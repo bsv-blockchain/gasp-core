@@ -1,11 +1,41 @@
 {
-  "name": "gasp-core",
+  "name": "gasp-protocol",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Graph Aware Sync Protocol for synchronizing transaction data between two parties in a blockchain environment.",
+  "main": "dist/bundle.cjs.js",
+  "module": "dist/bundle.esm.js",
+  "types": "dist/index.d.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "rollup -c",
+    "test": "jest",
+    "prepare": "npm run build"
   },
-  "author": "",
-  "license": "ISC"
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "blockchain",
+    "protocol",
+    "sync",
+    "transaction",
+    "GASP"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^17.1.0",
+    "@rollup/plugin-node-resolve": "^11.2.1",
+    "@rollup/plugin-typescript": "^8.2.0",
+    "@types/jest": "^26.0.20",
+    "jest": "^26.6.3",
+    "rollup": "^2.36.1",
+    "rollup-plugin-terser": "^7.0.2",
+    "ts-jest": "^26.5.4",
+    "ts-node": "^9.1.1",
+    "tslib": "^2.6.3",
+    "typescript": "^4.9.5"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^1.1.6"
+  }
 }

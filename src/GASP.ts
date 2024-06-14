@@ -1,7 +1,9 @@
+import { Transaction } from '@bsv/sdk'
+
 /**
  * Represents the initial request made under the Graph Aware Sync Protocol.
  */
-type GASPInitialRequest = {
+export type GASPInitialRequest = {
   /** GASP version. Currently 1. */
   version: number
   /** A variable-length bloom filter representing the list of UTXOs currently known by the sender of this request. */
@@ -11,7 +13,7 @@ type GASPInitialRequest = {
 /**
  * Represents an output, its encompassing transaction, and the associated metadata, together with references to inputs and their metadata.
  */
-type GASPNode = {
+export type GASPNode = {
   /** The graph ID to which this node belongs. */
   graphID: string
   /** The Bitcoin transaction. */
@@ -31,14 +33,14 @@ type GASPNode = {
 /**
  * Denotes which input transactions are requeste, and whether metadata needs to be sent.
  */
-type GASPNodeResponse = {
+export type GASPNodeResponse = {
   requestedInputs: Record<string, { metadata: boolean }>
 }
 
 /**
  * Facilitates the finding of UTXOs, determination of needed inputs, temporary graph management, and eventual graph finalization.
  */
-interface GASPStorage {
+export interface GASPStorage {
   /**
    * Returns an array of transaction outpoints that are currently known to be unspent.
    * @returns A promise for an array of objects, each containing txid and outputIndex properties.
@@ -51,7 +53,7 @@ interface GASPStorage {
    * @param metadata Whether transaction and output metadata should be returned.
    * @returns The hydrated GASP node, with or without metadata.
    */
-   hydrateGASPNode: (txid: string, outputIndex: number, metadata: boolean) => Promise<GASPNode>
+  hydrateGASPNode: (txid: string, outputIndex: number, metadata: boolean) => Promise<GASPNode>
   /**
    * For a given node, returns the inputs needed to complete the graph, including whether updated metadata is requested for those inputs.
    * @param tx The node for which needed inputs should be found.
@@ -83,62 +85,97 @@ interface GASPStorage {
   finalizeGraph: (graphID: string) => Promise<void>
 }
 
-interface GASPRemote {
+export interface GASPRemote {
   getInitialResponse: (request: GASPInitialRequest) => Promise<GASPNode[]>
   requestNode: (txid: string, outputIndex: number, metadata: boolean) => Promise<GASPNode>
   getFilter: () => Promise<string>
   submitNode: (node: GASPNode) => Promise<GASPNodeResponse>
 }
 
-class GASPVersionMismatchError extends Error {
+export class GASPVersionMismatchError extends Error {
   code: 'ERR_GASP_VERSION_MISMATCH'
   currentVersion: number
   foreignVersion: number
+
+  constructor(message: string, currentVersion: number, foreignVersion: number) {
+    super(message)
+    this.code = 'ERR_GASP_VERSION_MISMATCH'
+    this.currentVersion = currentVersion
+    this.foreignVersion = foreignVersion
+  }
 }
 
-class GASP {
+/**
+ * Main class implementing the Graph Aware Sync Protocol.
+ */
+export class GASP {
   version: number
   storage: GASPStorage
   remote: GASPRemote
 
-  constructor (storage: GASPStorage, remote: GASPRemote) {
+  constructor(storage: GASPStorage, remote: GASPRemote) {
     this.storage = storage
     this.remote = remote
     this.version = 1
   }
 
   /**
-   * Returns a bloom filter based on the set of elements.
-   */
+  * Calculates a bloom filter for a set of UTXOs.
+  * @param txs The array of UTXOs to include in the bloom filter.
+  * @returns A string representing the bloom filter.
+  */
   private calculateBloomFilter(txs: Array<{ txid: string, outputIndex: number }>): string {
-    return ''
+    // Bloom filter calculation logic (simplified for brevity)
+    return txs.map(tx => `${tx.txid}:${tx.outputIndex}`).join(',') // TODO: Implement properly
   }
 
   /**
-   * Returns true if the element is definitely not in the filter. If it returns false, the element is probably in the filter, but it might not be.
+   * Checks if a UTXO is excluded from the bloom filter.
+   * @param filter The bloom filter string.
+   * @param txid The transaction ID of the UTXO.
+   * @param outputIndex The output index of the UTXO.
+   * @returns True if the UTXO is not in the filter, false otherwise.
    */
   private checkFilterExclusion(filter: string, txid: string, outputIndex: number): boolean {
-    return true
+    // Check if the txid and outputIndex are in the filter
+    return !filter.includes(`${txid}:${outputIndex}`) // TODO: Implement properly
   }
 
   /**
-   * Computes the 36-byte representation by converting the number into a 4-byte string that is appended to the TXID.
+   * Computes a 36-byte structure from a transaction ID and output index.
+   * @param txid The transaction ID.
+   * @param index The output index.
+   * @returns A string representing the 36-byte structure.
    */
   private compute36ByteStructure(txid: string, index: number): string {
-    return ''
+    return `${txid}:${index.toString().padStart(4, '0')}`
   }
 
+  /**
+   * Deconstructs a 36-byte structure into a transaction ID and output index.
+   * @param outpoint The 36-byte structure.
+   * @returns An object containing the transaction ID and output index.
+   */
   private deconstruct36ByteStructure(outpoint: string): { txid: string, index: number } {
+    const [txid, index] = outpoint.split(':')
     return {
-      txid: '',
-      index: 0
+      txid,
+      index: parseInt(index, 10)
     }
   }
 
+  /**
+   * Computes the transaction ID for a given transaction.
+   * @param tx The transaction string.
+   * @returns The computed transaction ID.
+   */
   private computeTXID(tx: string): string {
-    return ''
+    return Transaction.fromHex(tx).id('hex')
   }
 
+  /**
+   * Synchronizes the transaction data between the local and remote participants.
+   */
   async sync(): Promise<void> {
     const initialRequest = await this.buildInitialRequest()
     const remoteUTXOs = await this.remote.getInitialResponse(initialRequest)
@@ -152,6 +189,10 @@ class GASP {
     }))
   }
 
+  /**
+  * Builds the initial request for the sync process.
+  * @returns A promise for the initial request object.
+  */
   async buildInitialRequest(): Promise<GASPInitialRequest> {
     const knownUTXOs = await this.storage.findKnownUTXOs()
     const filter = this.calculateBloomFilter(knownUTXOs)
@@ -161,38 +202,41 @@ class GASP {
     }
   }
 
+  /**
+   * Builds the initial response based on the received request.
+   * @param request The initial request object.
+   * @returns A promise for an array of GASP nodes.
+   */
   async buildInitialResponse(request: GASPInitialRequest): Promise<GASPNode[]> {
     if (request.version !== this.version) {
-      const e = new GASPVersionMismatchError(`GASP version mismatch. Current version: ${this.version}, foreign version: ${request.version}`)
-      e.code = 'ERR_GASP_VERSION_MISMATCH'
-      e.currentVersion = this.version
-      e.foreignVersion = request.version
-      throw e
+      throw new GASPVersionMismatchError(`GASP version mismatch. Current version: ${this.version}, foreign version: ${request.version}`, this.version, request.version)
     }
     return await this.getSyncUTXOsForFilter(request.UTXOBloom)
   }
 
+  /**
+   * Gets the sync UTXOs that are not included in the provided bloom filter.
+   * @param filter The bloom filter string.
+   * @returns A promise for an array of GASP nodes.
+   */
   async getSyncUTXOsForFilter(filter: string): Promise<GASPNode[]> {
     const knownUTXOs = await this.storage.findKnownUTXOs()
     const syncUTXOs: GASPNode[] = []
     await Promise.all(knownUTXOs.map(async known => {
-      const notInFilter = this.checkFilterExclusion(
-        filter,
-        known.txid,
-        known.outputIndex
-      )
+      const notInFilter = this.checkFilterExclusion(filter, known.txid, known.outputIndex)
       if (notInFilter) {
-        const node = await this.storage.hydrateGASPNode(
-          known.txid,
-          known.outputIndex,
-          true
-        )
+        const node = await this.storage.hydrateGASPNode(known.txid, known.outputIndex, true)
         syncUTXOs.push(node)
       }
     }))
     return syncUTXOs
   }
 
+  /**
+   * Processes an incoming node from the remote participant.
+   * @param node The incoming GASP node.
+   * @param spentBy The 36-byte structure of the node that spent this one, if applicable.
+   */
   async processIncomingNode(node: GASPNode, spentBy?: string): Promise<void> {
     try {
       await this.storage.appendToGraph(node, spentBy)
@@ -204,13 +248,7 @@ class GASP {
     await Promise.all(Object.entries(neededInputs.requestedInputs).map(async ([outpoint, { metadata }]) => {
       const { txid, index } = this.deconstruct36ByteStructure(outpoint)
       const newNode = await this.remote.requestNode(txid, index, metadata)
-      this.processIncomingNode(
-        newNode,
-        this.compute36ByteStructure(
-          this.computeTXID(node.tx),
-          node.outputIndex
-        )
-      )
+      this.processIncomingNode(newNode, this.compute36ByteStructure(this.computeTXID(node.tx), node.outputIndex))
     }))
     if (typeof spentBy === 'undefined') {
       try {
@@ -223,6 +261,10 @@ class GASP {
     }
   }
 
+  /**
+   * Processes an outgoing node to the remote participant.
+   * @param node The outgoing GASP node.
+   */
   async processOutgoingNode(node: GASPNode): Promise<void> {
     const response = await this.remote.submitNode(node)
     await Promise.all(Object.entries(response.requestedInputs).map(async ([outpoint, { metadata }]) => {
