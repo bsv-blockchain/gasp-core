@@ -1,3 +1,4 @@
+/* eslint-env jest */
 import { GASP, GASPInitialRequest, GASPNode, GASPNodeResponse, GASPStorage, GASPRemote, GASPVersionMismatchError } from '../GASP'
 
 // Mock implementations
@@ -103,6 +104,15 @@ describe('GASP', () => {
                 txMetadata: 'txMetadata',
                 outputMetadata: 'outputMetadata',
                 inputs: { 'input1': { hash: 'hash1' } }
+            },
+            {
+                graphID: 'txid2:1',
+                tx: 'txid2',
+                outputIndex: 1,
+                proof: 'proof',
+                txMetadata: 'txMetadata',
+                outputMetadata: 'outputMetadata',
+                inputs: { 'input1': { hash: 'hash1' } }
             }
         ])
     })
@@ -144,5 +154,88 @@ describe('GASP', () => {
         expect(mockRemote.getInitialResponse).toHaveBeenCalled()
         expect(mockRemote.getFilter).toHaveBeenCalled()
         expect(mockStorage.findKnownUTXOs).toHaveBeenCalled()
+    })
+})
+
+// Full GASP Implementation for sync tests
+
+const fullMockStorage: GASPStorage = {
+    findKnownUTXOs: jest.fn().mockResolvedValue([
+        { txid: 'txid1', outputIndex: 0 },
+        { txid: 'txid2', outputIndex: 1 },
+    ]),
+    hydrateGASPNode: jest.fn().mockImplementation((txid: string, outputIndex: number, metadata: boolean) => {
+        return Promise.resolve({
+            graphID: `${txid}:${outputIndex}`,
+            tx: txid,
+            outputIndex,
+            proof: metadata ? 'proof' : undefined,
+            txMetadata: metadata ? 'txMetadata' : undefined,
+            outputMetadata: metadata ? 'outputMetadata' : undefined,
+            inputs: metadata ? { 'input1': { hash: 'hash1' } } : undefined,
+        })
+    }),
+    findNeededInputs: jest.fn().mockImplementation((tx: GASPNode) => {
+        return Promise.resolve({
+            requestedInputs: {
+                'txid1:0': { metadata: true }
+            }
+        })
+    }),
+    appendToGraph: jest.fn().mockResolvedValue(undefined),
+    validateGraphAnchor: jest.fn().mockResolvedValue(undefined),
+    discardGraph: jest.fn().mockResolvedValue(undefined),
+    finalizeGraph: jest.fn().mockResolvedValue(undefined),
+}
+
+const fullMockRemote: GASPRemote = {
+    getInitialResponse: jest.fn().mockResolvedValue([
+        {
+            graphID: 'txid1:0',
+            tx: 'txid1',
+            outputIndex: 0,
+            proof: 'proof',
+            txMetadata: 'txMetadata',
+            outputMetadata: 'outputMetadata',
+            inputs: { 'input1': { hash: 'hash1' } },
+        }
+    ]),
+    requestNode: jest.fn().mockImplementation((txid: string, outputIndex: number, metadata: boolean) => {
+        return Promise.resolve({
+            graphID: `${txid}:${outputIndex}`,
+            tx: txid,
+            outputIndex,
+            proof: metadata ? 'proof' : undefined,
+            txMetadata: metadata ? 'txMetadata' : undefined,
+            outputMetadata: metadata ? 'outputMetadata' : undefined,
+            inputs: metadata ? { 'input1': { hash: 'hash1' } } : undefined,
+        })
+    }),
+    getFilter: jest.fn().mockResolvedValue('txid1:0,txid2:1'),
+    submitNode: jest.fn().mockImplementation((node: GASPNode) => {
+        return Promise.resolve({
+            requestedInputs: {
+                'txid1:0': { metadata: true }
+            }
+        })
+    }),
+}
+
+describe('Full GASP sync', () => {
+    let gasp: GASP
+
+    beforeEach(() => {
+        gasp = new GASP(fullMockStorage, fullMockRemote)
+    })
+
+    it('should sync UTXOs, inputs, metadata, and graph history correctly', async () => {
+        await gasp.sync()
+        expect(fullMockRemote.getInitialResponse).toHaveBeenCalled()
+        expect(fullMockRemote.getFilter).toHaveBeenCalled()
+        expect(fullMockStorage.findKnownUTXOs).toHaveBeenCalled()
+        expect(fullMockStorage.hydrateGASPNode).toHaveBeenCalled()
+        expect(fullMockStorage.appendToGraph).toHaveBeenCalled()
+        expect(fullMockStorage.validateGraphAnchor).toHaveBeenCalled()
+        expect(fullMockStorage.finalizeGraph).toHaveBeenCalled()
     })
 })

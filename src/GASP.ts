@@ -237,7 +237,10 @@ export class GASP {
    * @param node The incoming GASP node.
    * @param spentBy The 36-byte structure of the node that spent this one, if applicable.
    */
-  async processIncomingNode(node: GASPNode, spentBy?: string): Promise<void> {
+  async processIncomingNode(node: GASPNode, spentBy?: string, seenNodes = new Set()): Promise<void> {
+    const nodeId = `${node.tx}:${node.outputIndex}`
+    if (seenNodes.has(nodeId)) return // Prevent infinite recursion
+    seenNodes.add(nodeId)
     try {
       await this.storage.appendToGraph(node, spentBy)
     } catch (e) {
@@ -248,7 +251,7 @@ export class GASP {
     await Promise.all(Object.entries(neededInputs.requestedInputs).map(async ([outpoint, { metadata }]) => {
       const { txid, index } = this.deconstruct36ByteStructure(outpoint)
       const newNode = await this.remote.requestNode(txid, index, metadata)
-      this.processIncomingNode(newNode, this.compute36ByteStructure(this.computeTXID(node.tx), node.outputIndex))
+      await this.processIncomingNode(newNode, this.compute36ByteStructure(this.computeTXID(node.tx), node.outputIndex), seenNodes)
     }))
     if (typeof spentBy === 'undefined') {
       try {
@@ -265,12 +268,15 @@ export class GASP {
    * Processes an outgoing node to the remote participant.
    * @param node The outgoing GASP node.
    */
-  async processOutgoingNode(node: GASPNode): Promise<void> {
+  async processOutgoingNode(node: GASPNode, seenNodes = new Set()): Promise<void> {
+    const nodeId = `${node.tx}:${node.outputIndex}`
+    if (seenNodes.has(nodeId)) return // Prevent infinite recursion
+    seenNodes.add(nodeId)
     const response = await this.remote.submitNode(node)
     await Promise.all(Object.entries(response.requestedInputs).map(async ([outpoint, { metadata }]) => {
       const { txid, index } = this.deconstruct36ByteStructure(outpoint)
       const hydratedNode = await this.storage.hydrateGASPNode(txid, index, metadata)
-      await this.processOutgoingNode(hydratedNode)
+      await this.processOutgoingNode(hydratedNode, seenNodes)
     }))
   }
 }
