@@ -62,7 +62,7 @@ export interface GASPStorage {
    * Non-confirmed (non-timestamped) outputs should always be returned, regardless of the timestamp.
    * @returns A promise for an array of objects, each containing txid and outputIndex properties.
    */
-  findKnownUTXOs: (since?: number) => Promise<Array<{ txid: string, outputIndex: number }>>
+  findKnownUTXOs: (since: number) => Promise<Array<{ txid: string, outputIndex: number }>>
   /**
    * For a given txid and output index, returns the associated transaction, a merkle proof if the transaction is in a block, and metadata if if requested. If no metadata is requested, metadata hashes on inputs are not returned.
    * @param txid The transaction ID for the node to hydrate.
@@ -70,7 +70,7 @@ export interface GASPStorage {
    * @param metadata Whether transaction and output metadata should be returned.
    * @returns The hydrated GASP node, with or without metadata.
    */
-  hydrateGASPNode: (txid: string, outputIndex: number, metadata: boolean) => Promise<GASPNode>
+  hydrateGASPNode: (graphID: string, txid: string, outputIndex: number, metadata: boolean) => Promise<GASPNode>
   /**
    * For a given node, returns the inputs needed to complete the graph, including whether updated metadata is requested for those inputs.
    * @param tx The node for which needed inputs should be found.
@@ -111,7 +111,7 @@ export interface GASPRemote {
   /** Given an outgoing initial response, obtain the reply from the foreign instance. */
   getInitialReply: (response: GASPInitialResponse) => Promise<GASPInitialReply>
   /** Given an  outgoing txid, outputIndex and optional metadata, request the associated GASP node from the foreign instane. */
-  requestNode: (txid: string, outputIndex: number, metadata: boolean) => Promise<GASPNode>
+  requestNode: (graphID: string, txid: string, outputIndex: number, metadata: boolean) => Promise<GASPNode>
   /** Given an outgoing node, send the node to the foreign instance and determine which additional inputs (if any) they request in response. */
   submitNode: (node: GASPNode) => Promise<GASPNodeResponse | void>
 }
@@ -190,12 +190,12 @@ export class GASP implements GASPRemote {
     const initialRequest = await this.buildInitialRequest(this.lastInteraction)
     const initialResponse = await this.remote.getInitialResponse(initialRequest)
     await Promise.all(initialResponse.UTXOList.map(async UTXO => {
-      const resolvedNode = await this.remote.requestNode(UTXO.txid, UTXO.outputIndex, true)
+      const resolvedNode = await this.remote.requestNode(`${this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex)}`, UTXO.txid, UTXO.outputIndex, true)
       await this.processIncomingNode(resolvedNode)
     }))
     const initialReply = await this.remote.getInitialReply(initialResponse)
     await Promise.all(initialReply.UTXOList.map(async UTXO => {
-      const outgoingNode = await this.storage.hydrateGASPNode(UTXO.txid, UTXO.outputIndex, true)
+      const outgoingNode = await this.storage.hydrateGASPNode(`${this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex)}`, UTXO.txid, UTXO.outputIndex, true)
       await this.processOutgoingNode(outgoingNode)
     }))
   }
@@ -242,8 +242,8 @@ export class GASP implements GASPRemote {
   /**
    * Provides a requested node to a foreign instance who requested it.
    */
-  requestNode(txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
-    return this.storage.hydrateGASPNode(txid, outputIndex, metadata)
+  requestNode(graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
+    return this.storage.hydrateGASPNode(graphID, txid, outputIndex, metadata)
   }
 
   /**
@@ -277,7 +277,7 @@ export class GASP implements GASPRemote {
     if (neededInputs) {
       await Promise.all(Object.entries(neededInputs.requestedInputs).map(async ([outpoint, { metadata }]) => {
         const { txid, outputIndex } = this.deconstruct36ByteStructure(outpoint)
-        const newNode = await this.remote.requestNode(txid, outputIndex, metadata)
+        const newNode = await this.remote.requestNode(node.graphID, txid, outputIndex, metadata)
         await this.processIncomingNode(newNode, this.compute36ByteStructure(this.computeTXID(node.rawTx), node.outputIndex), seenNodes)
       }))
     }
@@ -296,7 +296,7 @@ export class GASP implements GASPRemote {
       await Promise.all(Object.entries(response.requestedInputs).map(async ([outpoint, { metadata }]) => {
         const { txid, outputIndex } = this.deconstruct36ByteStructure(outpoint)
         try {
-          const hydratedNode = await this.storage.hydrateGASPNode(txid, outputIndex, metadata)
+          const hydratedNode = await this.storage.hydrateGASPNode(node.graphID, txid, outputIndex, metadata)
           await this.processOutgoingNode(hydratedNode, seenNodes)
         } catch (e) {
           console.error(e)

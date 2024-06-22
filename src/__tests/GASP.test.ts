@@ -1,241 +1,146 @@
 /* eslint-env jest */
-import { GASP, GASPInitialRequest, GASPNode, GASPNodeResponse, GASPStorage, GASPRemote, GASPVersionMismatchError } from '../GASP'
+import { GASP, GASPInitialRequest, GASPNode, GASPNodeResponse, GASPStorage, GASPRemote, GASPInitialReply, GASPInitialResponse } from '../GASP'
 
-// Mock implementations
-const mockStorage: GASPStorage = {
-    findKnownUTXOs: jest.fn().mockResolvedValue([
-        { txid: 'txid1', outputIndex: 0 },
-        { txid: 'txid2', outputIndex: 1 },
-    ]),
-    hydrateGASPNode: jest.fn().mockImplementation((txid: string, outputIndex: number, metadata: boolean) => {
-        return Promise.resolve({
-            graphID: `${txid}:${outputIndex}`,
-            tx: txid,
-            outputIndex,
-            proof: metadata ? 'proof' : undefined,
-            txMetadata: metadata ? 'txMetadata' : undefined,
-            outputMetadata: metadata ? 'outputMetadata' : undefined,
-            inputs: metadata ? { 'input1': { hash: 'hash1' } } : undefined,
-        })
-    }),
-    findNeededInputs: jest.fn().mockImplementation((tx: GASPNode) => {
-        return Promise.resolve({
-            requestedInputs: {
-                'txid1:0': { metadata: true }
-            }
-        })
-    }),
-    appendToGraph: jest.fn().mockResolvedValue(undefined),
-    validateGraphAnchor: jest.fn().mockResolvedValue(undefined),
-    discardGraph: jest.fn().mockResolvedValue(undefined),
-    finalizeGraph: jest.fn().mockResolvedValue(undefined),
+type Graph = {
+    time: number,
+    txid: string,
+    outputIndex: number,
+    rawTx: string,
+    inputs: Record<string, Graph>
 }
 
-const mockRemote: GASPRemote = {
-    getInitialResponse: jest.fn().mockResolvedValue([
-        {
-            graphID: 'txid1:0',
-            tx: 'txid1',
-            outputIndex: 0,
-            proof: 'proof',
-            txMetadata: 'txMetadata',
-            outputMetadata: 'outputMetadata',
-            inputs: { 'input1': { hash: 'hash1' } },
-        }
-    ]),
-    requestNode: jest.fn().mockImplementation((txid: string, outputIndex: number, metadata: boolean) => {
-        return Promise.resolve({
-            graphID: `${txid}:${outputIndex}`,
-            tx: txid,
-            outputIndex,
-            proof: metadata ? 'proof' : undefined,
-            txMetadata: metadata ? 'txMetadata' : undefined,
-            outputMetadata: metadata ? 'outputMetadata' : undefined,
-            inputs: metadata ? { 'input1': { hash: 'hash1' } } : undefined,
-        })
-    }),
-    getFilter: jest.fn().mockResolvedValue('txid1:0,txid2:1'),
-    submitNode: jest.fn().mockImplementation((node: GASPNode) => {
-        return Promise.resolve({
-            requestedInputs: {
-                'txid1:0': { metadata: true }
+const syncTwoStorages = async (storage1: GASPStorage, storage2: GASPStorage): Promise<void> => {
+    const throwawayRemote: GASPRemote = {
+        getInitialResponse: async function (request: GASPInitialRequest): Promise<GASPInitialResponse> {
+            console.log('getInitialResponse called with request:', request)
+            const response = await storage1.findKnownUTXOs(request.since)
+            console.log('getInitialResponse response:', response)
+            return {
+                UTXOList: response,
+                since: Date.now()
             }
-        })
-    }),
+        },
+        getInitialReply: async function (response: GASPInitialResponse): Promise<GASPInitialReply> {
+            console.log('getInitialReply called with response:', response)
+            const reply = await storage1.findKnownUTXOs(response.since)
+            console.log('getInitialReply reply:', reply)
+            return {
+                UTXOList: reply.filter(x => !response.UTXOList.some(y => y.txid === x.txid && y.outputIndex === x.outputIndex))
+            }
+        },
+        requestNode: async function (graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
+            console.log('requestNode called with:', { graphID, txid, outputIndex, metadata })
+            const node = await storage1.hydrateGASPNode(graphID, txid, outputIndex, metadata)
+            console.log('requestNode response:', node)
+            return node
+        },
+        submitNode: async function (node: GASPNode): Promise<void | GASPNodeResponse> {
+            console.log('submitNode called with:', node)
+            const response = await storage1.appendToGraph(node)
+            console.log('submitNode response:', response)
+            return response
+        }
+    }
+    const gasp1 = new GASP(storage1, throwawayRemote)
+    const gasp2 = new GASP(storage2, gasp1)
+    gasp1.remote = gasp2
+    console.log('Starting sync')
+    await gasp1.sync()
+    console.log('Sync completed')
+}
+
+const makeStorageForVariables = (
+    knownStore: Array<Graph>,
+    tempGraphStore: Record<string, Graph>,
+    updateCallback: () => void
+): GASPStorage => {
+    return {
+        findKnownUTXOs: async function (since: number): Promise<{ txid: string; outputIndex: number }[]> {
+            const utxos = knownStore.filter(x => x.time > since).map(x => ({ txid: x.txid, outputIndex: x.outputIndex }))
+            console.log('findKnownUTXOs', since, utxos)
+            return utxos
+        },
+        hydrateGASPNode: async function (graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
+            const found = knownStore.find(x => x.txid === txid && x.outputIndex === outputIndex)
+            if (!found) {
+                throw new Error('Not found')
+            }
+            console.log('hydrateGASPNode', graphID, txid, outputIndex, metadata, found)
+            return {
+                graphID,
+                rawTx: found.rawTx,
+                outputIndex: found.outputIndex
+            }
+        },
+        findNeededInputs: async function (tx: GASPNode): Promise<void | GASPNodeResponse> {
+            console.log('findNeededInputs', tx)
+            // For testing, assume no additional inputs are needed
+            return
+        },
+        appendToGraph: async function (tx: GASPNode, spentBy?: string | undefined): Promise<void> {
+            console.log('appendToGraph', tx, spentBy)
+            tempGraphStore[tx.graphID] = {
+                ...tx,
+                time: 111,
+                txid: 'mock_txid_' + tx.rawTx,
+                inputs: {}
+            }
+        },
+        validateGraphAnchor: async function (graphID: string): Promise<void> {
+            console.log('validateGraphAnchor', graphID)
+            // Allow validation to pass
+        },
+        discardGraph: async function (graphID: string): Promise<void> {
+            console.log('discardGraph', graphID)
+            delete tempGraphStore[graphID]
+        },
+        finalizeGraph: async function (graphID: string): Promise<void> {
+            const tempGraph = tempGraphStore[graphID]
+            if (tempGraph) {
+                console.log('finalizeGraph', graphID, tempGraph)
+                knownStore.push(tempGraph)
+                updateCallback()
+                delete tempGraphStore[graphID]
+            }
+        }
+    }
 }
 
 describe('GASP', () => {
-    let gasp: GASP
-
-    beforeEach(() => {
-        gasp = new GASP(mockStorage, mockRemote)
-    })
-
-    it('should build initial request correctly', async () => {
-        const initialRequest = await gasp.buildInitialRequest()
-        expect(initialRequest).toEqual({
-            version: 1,
-            UTXOBloom: 'txid1:0,txid2:1'
-        })
-    })
-
-    it('should handle version mismatch in buildInitialResponse', async () => {
-        const incorrectRequest: GASPInitialRequest = {
-            version: 2,
-            UTXOBloom: 'filter'
-        }
-
-        await expect(gasp.buildInitialResponse(incorrectRequest)).rejects.toThrow(GASPVersionMismatchError)
-    })
-
-    it('should build initial response correctly', async () => {
-        const request: GASPInitialRequest = {
-            version: 1,
-            UTXOBloom: 'filter'
-        }
-
-        const response = await gasp.buildInitialResponse(request)
-        expect(response).toEqual([
+    it('Synchronizes a single UTXO from Alice to Bob', async () => {
+        let party1known: Array<Graph> = [
             {
-                graphID: 'txid1:0',
-                tx: 'txid1',
+                rawTx: 'mock_sender1_rawtx1',
                 outputIndex: 0,
-                proof: 'proof',
-                txMetadata: 'txMetadata',
-                outputMetadata: 'outputMetadata',
-                inputs: { 'input1': { hash: 'hash1' } }
-            },
+                time: 111,
+                txid: 'mock_sender1_txid1',
+                inputs: {}
+            }
+        ]
+        let party2known: Array<Graph> = []
+        const storage1 = makeStorageForVariables(party1known, {}, () => {
+            console.log('Updated party1known:', party1known)
+        })
+        const storage2 = makeStorageForVariables(party2known, {}, () => {
+            console.log('Updated party2known:', party2known)
+            party2known = [...party2known] // Trigger reactivity
+        })
+        await syncTwoStorages(storage1, storage2)
+
+        // Log the final state of party2known for debugging
+        console.log('Final state of party2known:', party2known)
+
+        // Expected known state after synchronization
+        const expectedKnown = [
             {
-                graphID: 'txid2:1',
-                tx: 'txid2',
-                outputIndex: 1,
-                proof: 'proof',
-                txMetadata: 'txMetadata',
-                outputMetadata: 'outputMetadata',
-                inputs: { 'input1': { hash: 'hash1' } }
+                rawTx: 'mock_sender1_rawtx1',
+                outputIndex: 0,
+                time: 111,
+                txid: 'mock_sender1_txid1',
+                inputs: {}
             }
-        ])
-    })
+        ]
 
-    it('should process incoming nodes correctly', async () => {
-        const node: GASPNode = {
-            graphID: 'txid1:0',
-            tx: 'txid1',
-            outputIndex: 0,
-            proof: 'proof',
-            txMetadata: 'txMetadata',
-            outputMetadata: 'outputMetadata',
-            inputs: { 'input1': { hash: 'hash1' } }
-        }
-
-        await gasp.processIncomingNode(node)
-        expect(mockStorage.appendToGraph).toHaveBeenCalledWith(node, undefined)
-        expect(mockStorage.validateGraphAnchor).toHaveBeenCalledWith(node.graphID)
-        expect(mockStorage.finalizeGraph).toHaveBeenCalledWith(node.graphID)
-    })
-
-    it('should process outgoing nodes correctly', async () => {
-        const node: GASPNode = {
-            graphID: 'txid1:0',
-            tx: 'txid1',
-            outputIndex: 0,
-            proof: 'proof',
-            txMetadata: 'txMetadata',
-            outputMetadata: 'outputMetadata',
-            inputs: { 'input1': { hash: 'hash1' } }
-        }
-
-        await gasp.processOutgoingNode(node)
-        expect(mockRemote.submitNode).toHaveBeenCalledWith(node)
-    })
-
-    it('should sync correctly', async () => {
-        await gasp.sync()
-        expect(mockRemote.getInitialResponse).toHaveBeenCalled()
-        expect(mockRemote.getFilter).toHaveBeenCalled()
-        expect(mockStorage.findKnownUTXOs).toHaveBeenCalled()
-    })
-})
-
-// Full GASP Implementation for sync tests
-
-const fullMockStorage: GASPStorage = {
-    findKnownUTXOs: jest.fn().mockResolvedValue([
-        { txid: 'txid1', outputIndex: 0 },
-        { txid: 'txid2', outputIndex: 1 },
-    ]),
-    hydrateGASPNode: jest.fn().mockImplementation((txid: string, outputIndex: number, metadata: boolean) => {
-        return Promise.resolve({
-            graphID: `${txid}:${outputIndex}`,
-            tx: txid,
-            outputIndex,
-            proof: metadata ? 'proof' : undefined,
-            txMetadata: metadata ? 'txMetadata' : undefined,
-            outputMetadata: metadata ? 'outputMetadata' : undefined,
-            inputs: metadata ? { 'input1': { hash: 'hash1' } } : undefined,
-        })
-    }),
-    findNeededInputs: jest.fn().mockImplementation((tx: GASPNode) => {
-        return Promise.resolve({
-            requestedInputs: {
-                'txid1:0': { metadata: true }
-            }
-        })
-    }),
-    appendToGraph: jest.fn().mockResolvedValue(undefined),
-    validateGraphAnchor: jest.fn().mockResolvedValue(undefined),
-    discardGraph: jest.fn().mockResolvedValue(undefined),
-    finalizeGraph: jest.fn().mockResolvedValue(undefined),
-}
-
-const fullMockRemote: GASPRemote = {
-    getInitialResponse: jest.fn().mockResolvedValue([
-        {
-            graphID: 'txid1:0',
-            tx: 'txid1',
-            outputIndex: 0,
-            proof: 'proof',
-            txMetadata: 'txMetadata',
-            outputMetadata: 'outputMetadata',
-            inputs: { 'input1': { hash: 'hash1' } },
-        }
-    ]),
-    requestNode: jest.fn().mockImplementation((txid: string, outputIndex: number, metadata: boolean) => {
-        return Promise.resolve({
-            graphID: `${txid}:${outputIndex}`,
-            tx: txid,
-            outputIndex,
-            proof: metadata ? 'proof' : undefined,
-            txMetadata: metadata ? 'txMetadata' : undefined,
-            outputMetadata: metadata ? 'outputMetadata' : undefined,
-            inputs: metadata ? { 'input1': { hash: 'hash1' } } : undefined,
-        })
-    }),
-    getFilter: jest.fn().mockResolvedValue('txid1:0,txid2:1'),
-    submitNode: jest.fn().mockImplementation((node: GASPNode) => {
-        return Promise.resolve({
-            requestedInputs: {
-                'txid1:0': { metadata: true }
-            }
-        })
-    }),
-}
-
-describe('Full GASP sync', () => {
-    let gasp: GASP
-
-    beforeEach(() => {
-        gasp = new GASP(fullMockStorage, fullMockRemote)
-    })
-
-    it('should sync UTXOs, inputs, metadata, and graph history correctly', async () => {
-        await gasp.sync()
-        expect(fullMockRemote.getInitialResponse).toHaveBeenCalled()
-        expect(fullMockRemote.getFilter).toHaveBeenCalled()
-        expect(fullMockStorage.findKnownUTXOs).toHaveBeenCalled()
-        expect(fullMockStorage.hydrateGASPNode).toHaveBeenCalled()
-        expect(fullMockStorage.appendToGraph).toHaveBeenCalled()
-        expect(fullMockStorage.validateGraphAnchor).toHaveBeenCalled()
-        expect(fullMockStorage.finalizeGraph).toHaveBeenCalled()
+        expect(party2known).toEqual(expectedKnown)
     })
 })
