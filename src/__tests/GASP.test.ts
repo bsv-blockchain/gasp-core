@@ -12,41 +12,41 @@ type Graph = {
 const syncTwoStorages = async (storage1: GASPStorage, storage2: GASPStorage): Promise<void> => {
     const throwawayRemote: GASPRemote = {
         getInitialResponse: async function (request: GASPInitialRequest): Promise<GASPInitialResponse> {
-            console.log('getInitialResponse called with request:', request)
+            console.log('[Remote #1] getInitialResponse called with request:', request)
             const response = await storage1.findKnownUTXOs(request.since)
-            console.log('getInitialResponse response:', response)
+            console.log('[Remote #1] getInitialResponse response:', response)
             return {
                 UTXOList: response,
                 since: Date.now()
             }
         },
         getInitialReply: async function (response: GASPInitialResponse): Promise<GASPInitialReply> {
-            console.log('getInitialReply called with response:', response)
+            console.log('[Remote #1] getInitialReply called with response:', response)
             const reply = await storage1.findKnownUTXOs(response.since)
-            console.log('getInitialReply reply:', reply)
+            console.log('[Remote #1] getInitialReply reply:', reply)
             return {
                 UTXOList: reply.filter(x => !response.UTXOList.some(y => y.txid === x.txid && y.outputIndex === x.outputIndex))
             }
         },
         requestNode: async function (graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
-            console.log('requestNode called with:', { graphID, txid, outputIndex, metadata })
+            console.log('[Remote #1] requestNode called with:', { graphID, txid, outputIndex, metadata })
             const node = await storage1.hydrateGASPNode(graphID, txid, outputIndex, metadata)
-            console.log('requestNode response:', node)
+            console.log('[Remote #1] requestNode response:', node)
             return node
         },
         submitNode: async function (node: GASPNode): Promise<void | GASPNodeResponse> {
-            console.log('submitNode called with:', node)
+            console.log('[Remote #1] submitNode called with:', node)
             const response = await storage1.appendToGraph(node)
-            console.log('submitNode response:', response)
+            console.log('[Remote #1] submitNode response:', response)
             return response
         }
     }
     const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
     const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
     gasp1.remote = gasp2
-    console.log('Starting sync')
+    console.log('[Sync] Starting sync')
     await gasp1.sync()
-    console.log('Sync completed')
+    console.log('[Sync] Sync completed')
 }
 
 const makeStorageForVariables = (
@@ -59,7 +59,7 @@ const makeStorageForVariables = (
             const utxos = knownStore
                 .filter(x => !x.time || x.time > since) // Include UTXOs with no timestamp or timestamps greater than 'since'
                 .map(x => ({ txid: x.txid, outputIndex: x.outputIndex }))
-            console.log('findKnownUTXOs', since, utxos)
+            console.log('[Storage] findKnownUTXOs', since, utxos)
             return utxos
         },
         hydrateGASPNode: async function (graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
@@ -67,7 +67,7 @@ const makeStorageForVariables = (
             if (!found) {
                 throw new Error('Not found')
             }
-            console.log('hydrateGASPNode', graphID, txid, outputIndex, metadata, found)
+            console.log('[Storage] hydrateGASPNode', graphID, txid, outputIndex, metadata, found)
             return {
                 graphID,
                 rawTx: found.rawTx,
@@ -75,12 +75,12 @@ const makeStorageForVariables = (
             }
         },
         findNeededInputs: async function (tx: GASPNode): Promise<void | GASPNodeResponse> {
-            console.log('findNeededInputs', tx)
+            console.log('[Storage] findNeededInputs', tx)
             // For testing, assume no additional inputs are needed
             return
         },
         appendToGraph: async function (tx: GASPNode, spentBy?: string | undefined): Promise<void> {
-            console.log('appendToGraph', tx, spentBy)
+            console.log('[Storage] appendToGraph', tx, spentBy)
             tempGraphStore[tx.graphID] = {
                 ...tx,
                 time: 111,
@@ -89,20 +89,22 @@ const makeStorageForVariables = (
             }
         },
         validateGraphAnchor: async function (graphID: string): Promise<void> {
-            console.log('validateGraphAnchor', graphID)
+            console.log('[Storage] validateGraphAnchor', graphID)
             // Allow validation to pass
         },
         discardGraph: async function (graphID: string): Promise<void> {
-            console.log('discardGraph', graphID)
+            console.log('[Storage] discardGraph', graphID)
             delete tempGraphStore[graphID]
         },
         finalizeGraph: async function (graphID: string): Promise<void> {
             const tempGraph = tempGraphStore[graphID]
             if (tempGraph) {
-                console.log('finalizeGraph', graphID, tempGraph)
+                console.log('[Storage] finalizeGraph', graphID, tempGraph)
                 knownStore.push(tempGraph)
                 updateCallback()
                 delete tempGraphStore[graphID]
+            } else {
+                console.log('[Storage] no graph to finalize', graphID, tempGraph)
             }
         }
     }

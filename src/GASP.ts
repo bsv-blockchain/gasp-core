@@ -211,32 +211,36 @@ export class GASP implements GASPRemote {
     const initialResponse = await this.remote.getInitialResponse(initialRequest)
     this.logData(`Received initial response: ${JSON.stringify(initialResponse)}`)
 
-    await Promise.all(initialResponse.UTXOList.map(async UTXO => {
-      this.logData(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
-      const resolvedNode = await this.remote.requestNode(
-        this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
-        UTXO.txid,
-        UTXO.outputIndex,
-        true
-      )
-      this.logData(`Received node: ${JSON.stringify(resolvedNode)}`)
-      await this.processIncomingNode(resolvedNode)
-    }))
+    if (initialResponse.UTXOList.length > 0) {
+      await Promise.all(initialResponse.UTXOList.map(async UTXO => {
+        this.logData(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
+        const resolvedNode = await this.remote.requestNode(
+          this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
+          UTXO.txid,
+          UTXO.outputIndex,
+          true
+        )
+        this.logData(`Received node: ${JSON.stringify(resolvedNode)}`)
+        await this.processIncomingNode(resolvedNode)
+      }))
+    }
 
     const initialReply = await this.remote.getInitialReply(initialResponse)
     this.logData(`Received initial reply: ${JSON.stringify(initialReply)}`)
 
-    await Promise.all(initialReply.UTXOList.map(async UTXO => {
-      this.logData(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
-      const outgoingNode = await this.storage.hydrateGASPNode(
-        this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
-        UTXO.txid,
-        UTXO.outputIndex,
-        true
-      )
-      this.logData(`Hydrated GASP node: ${JSON.stringify(outgoingNode)}`)
-      await this.processOutgoingNode(outgoingNode)
-    }))
+    if (initialReply.UTXOList.length > 0) {
+      await Promise.all(initialReply.UTXOList.map(async UTXO => {
+        this.logData(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
+        const outgoingNode = await this.storage.hydrateGASPNode(
+          this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
+          UTXO.txid,
+          UTXO.outputIndex,
+          true
+        )
+        this.logData(`Hydrated GASP node: ${JSON.stringify(outgoingNode)}`)
+        await this.processOutgoingNode(outgoingNode)
+      }))
+    }
   }
 
   /**
