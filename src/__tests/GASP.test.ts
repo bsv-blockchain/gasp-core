@@ -56,7 +56,9 @@ const makeStorageForVariables = (
 ): GASPStorage => {
     return {
         findKnownUTXOs: async function (since: number): Promise<{ txid: string; outputIndex: number }[]> {
-            const utxos = knownStore.filter(x => x.time > since).map(x => ({ txid: x.txid, outputIndex: x.outputIndex }))
+            const utxos = knownStore
+                .filter(x => !x.time || x.time > since) // Include UTXOs with no timestamp or timestamps greater than 'since'
+                .map(x => ({ txid: x.txid, outputIndex: x.outputIndex }))
             console.log('findKnownUTXOs', since, utxos)
             return utxos
         },
