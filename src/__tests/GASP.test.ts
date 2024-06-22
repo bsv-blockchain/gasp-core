@@ -41,8 +41,8 @@ const syncTwoStorages = async (storage1: GASPStorage, storage2: GASPStorage): Pr
             return response
         }
     }
-    const gasp1 = new GASP(storage1, throwawayRemote)
-    const gasp2 = new GASP(storage2, gasp1)
+    const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+    const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
     gasp1.remote = gasp2
     console.log('Starting sync')
     await gasp1.sync()
