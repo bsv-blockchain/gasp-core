@@ -146,7 +146,7 @@ export class GASP implements GASPRemote {
    * @param remote The GASP Remote interface to use
    * @param lastInteraction The timestamp when we last interacted with this remote party
    */
-  constructor(storage: GASPStorage, remote: GASPRemote, lastInteraction = 0, logPrefix = '[GASP] ', log = true) {
+  constructor(storage: GASPStorage, remote: GASPRemote, lastInteraction = 0, logPrefix = '[GASP] ', log = false) {
     this.storage = storage
     this.remote = remote
     this.lastInteraction = lastInteraction
