@@ -169,7 +169,7 @@ export class GASP implements GASPRemote {
    * @returns A string representing the 36-byte structure.
    */
   private compute36ByteStructure(txid: string, index: number): string {
-    const result = `${txid}.${index.toString().padStart(4, '0')}`
+    const result = `${txid}.${index.toString()}`
     this.logData(`Computed 36-byte structure: ${result} from txid: ${txid}, index: ${index}`)
     return result
   }
@@ -206,11 +206,7 @@ export class GASP implements GASPRemote {
   async sync(): Promise<void> {
     this.logData(`Starting sync process. Last interaction timestamp: ${this.lastInteraction}`)
     const initialRequest = await this.buildInitialRequest(this.lastInteraction)
-    this.logData(`Built initial request: ${JSON.stringify(initialRequest)}`)
-
     const initialResponse = await this.remote.getInitialResponse(initialRequest)
-    this.logData(`Received initial response: ${JSON.stringify(initialResponse)}`)
-
     if (initialResponse.UTXOList.length > 0) {
       await Promise.all(initialResponse.UTXOList.map(async UTXO => {
         this.logData(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
@@ -220,12 +216,13 @@ export class GASP implements GASPRemote {
           UTXO.outputIndex,
           true
         )
-        this.logData(`Received node: ${JSON.stringify(resolvedNode)}`)
+        this.logData(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
         await this.processIncomingNode(resolvedNode)
+        await this.completeGraph(resolvedNode.graphID)
       }))
     }
 
-    const initialReply = await this.remote.getInitialReply(initialResponse)
+    const initialReply = await this.getInitialReply(initialResponse)
     this.logData(`Received initial reply: ${JSON.stringify(initialReply)}`)
 
     if (initialReply.UTXOList.length > 0) {
@@ -237,10 +234,11 @@ export class GASP implements GASPRemote {
           UTXO.outputIndex,
           true
         )
-        this.logData(`Hydrated GASP node: ${JSON.stringify(outgoingNode)}`)
+        this.logData(`Sending unspent graph node for remote: ${JSON.stringify(outgoingNode)}`)
         await this.processOutgoingNode(outgoingNode)
       }))
     }
+    this.logData('Sync completed!')
   }
 
   /**
@@ -299,9 +297,9 @@ export class GASP implements GASPRemote {
   /**
    * Provides a requested node to a foreign instance who requested it.
    */
-  requestNode(graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
-    this.logData(`Requesting node with graphID: ${graphID}, txid: ${txid}, outputIndex: ${outputIndex}, metadata: ${metadata}`)
-    const node = this.storage.hydrateGASPNode(graphID, txid, outputIndex, metadata)
+  async requestNode(graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
+    this.logData(`Remote is requesting node with graphID: ${graphID}, txid: ${txid}, outputIndex: ${outputIndex}, metadata: ${metadata}`)
+    const node = await this.storage.hydrateGASPNode(graphID, txid, outputIndex, metadata)
     this.logData(`Returning node: ${JSON.stringify(node)}`)
     return node
   }
@@ -311,22 +309,31 @@ export class GASP implements GASPRemote {
    * Also finalizes or discards a graph if no additional data is requested from the foreign instance.
    */
   async submitNode(node: GASPNode): Promise<GASPNodeResponse | void> {
-    this.logData(`Submitting node: ${JSON.stringify(node)}`)
+    this.logData(`Remote party is submitting node: ${JSON.stringify(node)}`)
     await this.storage.appendToGraph(node)
     const requestedInputs = await this.storage.findNeededInputs(node)
     this.logData(`Requested inputs: ${JSON.stringify(requestedInputs)}`)
     if (!requestedInputs) {
-      try {
-        await this.storage.validateGraphAnchor(node.graphID)
-        this.logData(`Graph validated for node: ${node.graphID}`)
-        await this.storage.finalizeGraph(node.graphID)
-        this.logData(`Graph finalized for node: ${node.graphID}`)
-      } catch (e) {
-        this.logData(`Error validating graph: ${(e as Error).message}. Discarding graph for node: ${node.graphID}`)
-        await this.storage.discardGraph(node.graphID)
-      }
+      await this.completeGraph(node.graphID)
     }
     return requestedInputs
+  }
+
+  /**
+   * Handles the completion of a newly-synced graph
+   * @param {string} graphID The ID of the newly-synced graph
+   */
+  async completeGraph(graphID: string): Promise<void> {
+    this.logData(`Completing newly-synced graph: ${graphID}`)
+    try {
+      await this.storage.validateGraphAnchor(graphID)
+      this.logData(`Graph validated for node: ${graphID}`)
+      await this.storage.finalizeGraph(graphID)
+      this.logData(`Graph finalized for node: ${graphID}`)
+    } catch (e) {
+      this.logData(`Error validating graph: ${(e as Error).message}. Discarding graph for node: ${graphID}`)
+      await this.storage.discardGraph(graphID)
+    }
   }
 
   /**
@@ -342,6 +349,7 @@ export class GASP implements GASPRemote {
       return // Prevent infinite recursion
     }
     seenNodes.add(nodeId)
+    await this.storage.appendToGraph(node, spentBy)
     const neededInputs = await this.storage.findNeededInputs(node)
     this.logData(`Needed inputs for node ${nodeId}: ${JSON.stringify(neededInputs)}`)
     if (neededInputs) {
