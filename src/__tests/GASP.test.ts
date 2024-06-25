@@ -2,6 +2,7 @@
 import { GASP, GASPInitialRequest, GASPNode, GASPNodeResponse, GASPStorage, GASPRemote, GASPInitialReply, GASPInitialResponse } from '../GASP'
 
 type Graph = {
+    graphID: string,
     time: number,
     txid: string,
     outputIndex: number,
@@ -52,7 +53,7 @@ class MockStorage implements GASPStorage {
 
     private logData(...data: any): void {
         if (this.log) {
-            this.logData(this.logPrefix, ...data)
+            console.log(this.logPrefix, ...data)
         }
     }
 
@@ -60,7 +61,7 @@ class MockStorage implements GASPStorage {
         const utxos = this.knownStore
             .filter(x => !x.time || x.time > since) // Include UTXOs with no timestamp or timestamps greater than 'since'
             .map(x => ({ txid: x.txid, outputIndex: x.outputIndex }))
-        this.logData('[Storage] findKnownUTXOs', since, utxos)
+        this.logData('findKnownUTXOs', since, utxos)
         return utxos
     }
 
@@ -69,54 +70,66 @@ class MockStorage implements GASPStorage {
         if (!found) {
             throw new Error('Not found')
         }
-        this.logData('[Storage] hydrateGASPNode', graphID, txid, outputIndex, metadata, found)
+        this.logData('hydrateGASPNode', graphID, txid, outputIndex, metadata, found)
         return {
             graphID,
             rawTx: found.rawTx,
-            outputIndex: found.outputIndex
+            outputIndex: found.outputIndex,
+            proof: 'mock_proof', // Mock proof
+            txMetadata: metadata ? 'mock_tx_metadata' : undefined,
+            outputMetadata: metadata ? 'mock_output_metadata' : undefined,
+            inputs: metadata ? { 'mock_input': { hash: 'mock_hash' } } : undefined
         }
     }
 
     async findNeededInputs(tx: GASPNode): Promise<void | GASPNodeResponse> {
-        this.logData('[Storage] findNeededInputs', tx)
-        // For testing, assume no additional inputs are needed
+        this.logData('findNeededInputs', tx)
+        // For testing, assume no additional inputs are needed, unless specified
+        if (tx.graphID.includes('recursive')) {
+            return {
+                requestedInputs: {
+                    'recursive_txid.1': { metadata: true }
+                }
+            }
+        }
         return
     }
 
     async appendToGraph(tx: GASPNode, spentBy?: string | undefined): Promise<void> {
-        this.logData('[Storage] appendToGraph', tx, spentBy)
+        this.logData('appendToGraph', tx, spentBy)
         this.tempGraphStore[tx.graphID] = {
             ...tx,
-            time: 111,
-            txid: 'mock_sender1_txid1',
+            time: Date.now(),
+            txid: tx.graphID.split('.')[0],
             inputs: {}
         }
     }
 
     async validateGraphAnchor(graphID: string): Promise<void> {
-        this.logData('[Storage] validateGraphAnchor', graphID)
+        this.logData('validateGraphAnchor', graphID)
         // Allow validation to pass
     }
 
     async discardGraph(graphID: string): Promise<void> {
-        this.logData('[Storage] discardGraph', graphID)
+        this.logData('discardGraph', graphID)
         delete this.tempGraphStore[graphID]
     }
 
     async finalizeGraph(graphID: string): Promise<void> {
         const tempGraph = this.tempGraphStore[graphID]
         if (tempGraph) {
-            this.logData('[Storage] finalizeGraph', graphID, tempGraph)
+            this.logData('finalizeGraph', graphID, tempGraph)
             this.knownStore.push(tempGraph)
             this.updateCallback()
             delete this.tempGraphStore[graphID]
         } else {
-            this.logData('[Storage] no graph to finalize', graphID, tempGraph)
+            this.logData('no graph to finalize', graphID, tempGraph)
         }
     }
 }
 
 const mockUTXO = {
+    graphID: 'mock_sender1_txid1.0',
     rawTx: 'mock_sender1_rawtx1',
     outputIndex: 0,
     time: 111,
@@ -125,6 +138,7 @@ const mockUTXO = {
 }
 
 const mockInputNode = {
+    graphID: 'mock_sender1_txid1.0',
     rawTx: 'deadbeef01010101',
     outputIndex: 0,
     time: 222,
@@ -140,6 +154,9 @@ const mockUTXOWithInput = {
 }
 
 describe('GASP', () => {
+    afterEach(() => {
+        jest.resetAllMocks()
+    })
     it('Fails to sync if versions are wrong', async () => {
         const originalError = console.error
         console.error = jest.fn()
@@ -238,5 +255,98 @@ describe('GASP', () => {
         await gasp1.sync()
         expect((await storage2.findKnownUTXOs(0)).length).toBe(1)
         expect(await storage2.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
+    })
+    it('Synchronizes multiple graphs from Alice to Bob', async () => {
+        const mockUTXO2 = {
+            graphID: 'mock_sender2_txid1.0',
+            rawTx: 'mock_sender2_rawtx1',
+            outputIndex: 0,
+            time: 222,
+            txid: 'mock_sender2_txid1',
+            inputs: {}
+        }
+
+        const storage1 = new MockStorage([mockUTXO, mockUTXO2])
+        const storage2 = new MockStorage()
+        const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+        const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+        gasp1.remote = gasp2
+        await gasp1.sync()
+        expect((await storage2.findKnownUTXOs(0)).length).toBe(2)
+        expect(await storage2.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
+    })
+    it('Synchronizes a graph with recursive inputs from Bob to Alice', async () => {
+        const recursiveInputNode = {
+            graphID: 'recursive_txid.1',
+            rawTx: 'recursive_rawtx',
+            outputIndex: 1,
+            time: 333,
+            txid: 'recursive_txid',
+            inputs: {}
+        }
+
+        const complexUTXOWithInput = {
+            ...mockUTXOWithInput,
+            inputs: {
+                ...mockUTXOWithInput.inputs,
+                'recursive_txid.1': recursiveInputNode
+            }
+        }
+
+        const storage1 = new MockStorage()
+        storage1.findNeededInputs = jest.fn().mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+            return {
+                requestedInputs: {
+                    'mock_sender1_txid2.0': {
+                        metadata: true
+                    },
+                    'recursive_txid.1': {
+                        metadata: true
+                    }
+                }
+            }
+        })
+        const storage2 = new MockStorage([complexUTXOWithInput])
+        storage2.hydrateGASPNode = jest.fn()
+            .mockReturnValueOnce(mockUTXO)
+            .mockReturnValueOnce(mockInputNode)
+            .mockReturnValueOnce(recursiveInputNode)
+        const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+        const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+        gasp1.remote = gasp2
+        await gasp1.sync()
+        expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
+        expect(await storage1.findKnownUTXOs(0)).toEqual(await storage2.findKnownUTXOs(0))
+    })
+    it('Synchronizes only UTXOs created after the specified since timestamp', async () => {
+        const oldUTXO = {
+            graphID: 'old_txid.0',
+            rawTx: 'old_rawtx',
+            outputIndex: 0,
+            time: 100,
+            txid: 'old_txid',
+            inputs: {}
+        }
+
+        const newUTXO = {
+            graphID: 'new_txid.1',
+            rawTx: 'new_rawtx',
+            outputIndex: 1,
+            time: 200,
+            txid: 'new_txid',
+            inputs: {}
+        }
+
+        const storage1 = new MockStorage([oldUTXO, newUTXO])
+        const storage2 = new MockStorage()
+        const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+        const gasp2 = new GASP(storage2, gasp1, 150, '[GASP #2] ') // Setting the `since` timestamp to 150
+        gasp1.remote = gasp2
+        await gasp1.sync()
+
+        // Ensure only the new UTXO is synchronized
+        const syncedUTXOs = await storage2.findKnownUTXOs(0)
+        expect(syncedUTXOs.length).toBe(1)
+        expect(syncedUTXOs).toEqual([{ txid: 'new_txid', outputIndex: 1 }])
     })
 })
