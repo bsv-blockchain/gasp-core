@@ -367,4 +367,450 @@ describe('GASP', () => {
         expect(storage2.finalizeGraph).not.toHaveBeenCalled()
         expect(await storage2.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
     })
+    it('Handles invalid timestamp format gracefully', async () => {
+        const storage1 = new MockStorage()
+        expect(() => new GASP(storage1, throwawayRemote, -1)).toThrow('Invalid timestamp format')
+    })
+
+    it('Handles missing UTXO during node hydration', async () => {
+        const storage1 = new MockStorage()
+        const storage2 = new MockStorage([mockUTXO])
+        storage2.hydrateGASPNode = jest.fn().mockRejectedValueOnce(new Error('Not found'))
+        const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+        const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+        gasp1.remote = gasp2
+        await gasp1.sync()
+        expect(await storage2.findKnownUTXOs(0)).not.toEqual(await storage1.findKnownUTXOs(0))
+    })
+    it('Handles multiple UTXOs with mixed success and failure', async () => {
+        const invalidUTXO = {
+            graphID: 'invalid_txid.0',
+            rawTx: 'invalid_rawtx',
+            outputIndex: 0,
+            time: 150,
+            txid: 'invalid_txid',
+            inputs: {}
+        }
+
+        const storage1 = new MockStorage([mockUTXO, invalidUTXO])
+        const storage2 = new MockStorage()
+        storage1.hydrateGASPNode = jest.fn().mockImplementation(async (graphID: string, txid: string, outputIndex: number, metadata: boolean) => {
+            if (txid === 'invalid_txid') {
+                throw new Error('Invalid transaction')
+            }
+            return {
+                graphID,
+                rawTx: mockUTXO.rawTx,
+                outputIndex,
+                proof: 'mock_proof',
+                txMetadata: metadata ? 'mock_tx_metadata' : undefined,
+                outputMetadata: metadata ? 'mock_output_metadata' : undefined,
+                inputs: metadata ? { 'mock_input': { hash: 'mock_hash' } } : undefined
+            }
+        })
+
+        const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+        const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+        gasp1.remote = gasp2
+
+        await gasp1.sync()
+
+        const syncedUTXOs = await storage2.findKnownUTXOs(0)
+        expect(syncedUTXOs.length).toBe(1)
+        expect(syncedUTXOs).toEqual([{ txid: 'mock_sender1_txid1', outputIndex: 0 }])
+    })
+    describe('Not that this should ever happen in Bitcoin, but...', () => {
+        it('Prevents infinite recursion with cyclically referencing nodes', async () => {
+            const cyclicNode1 = {
+                graphID: 'cyclic_txid1.0',
+                rawTx: 'cyclic_rawtx1',
+                outputIndex: 0,
+                time: 300,
+                txid: 'cyclic_txid1',
+                inputs: {
+                    'cyclic_txid2.0': {
+                        graphID: 'cyclic_txid2.0',
+                        rawTx: 'deadbeef2024',
+                        outputIndex: 0,
+                        time: 300,
+                        txid: 'cyclic_txid2',
+                        inputs: {
+                            'cyclic_txid1.0': {
+                                graphID: 'cyclic_txid1.0',
+                                rawTx: 'cyclic_rawtx1',
+                                outputIndex: 0,
+                                time: 300,
+                                txid: 'cyclic_txid1',
+                                inputs: {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            const storage1 = new MockStorage([cyclicNode1])
+            const storage2 = new MockStorage()
+
+            storage2.findNeededInputs = jest.fn().mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                return {
+                    requestedInputs: {
+                        'cyclic_txid2.0': {
+                            metadata: true
+                        }
+                    }
+                }
+            }).mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                return {
+                    requestedInputs: {
+                        'cyclic_txid1.0': {
+                            metadata: true
+                        }
+                    }
+                }
+            }).mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                return {
+                    requestedInputs: {
+                        'cyclic_txid2.0': {
+                            metadata: true
+                        }
+                    }
+                }
+            })
+            storage1.hydrateGASPNode = jest.fn()
+                .mockReturnValueOnce(cyclicNode1)
+                .mockReturnValueOnce(cyclicNode1.inputs['cyclic_txid2.0'])
+                .mockReturnValueOnce(cyclicNode1)
+                .mockReturnValueOnce(cyclicNode1.inputs['cyclic_txid2.0'])
+
+            const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+            const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+            gasp1.remote = gasp2
+            await gasp1.sync()
+
+            // No UTXOs were synced between the parties
+            expect((await storage2.findKnownUTXOs(0)).length).toBe(0)
+            // The sync process did not complete
+            expect(await storage2.findKnownUTXOs(0)).not.toEqual(await storage1.findKnownUTXOs(0))
+            // Two nodes were appended to the temporary graph
+            expect(storage2.appendToGraph).toHaveBeenCalledTimes(2)
+            // Two nodes are in temporary storage, the ones that were sent
+            expect(Object.keys(storage2.tempGraphStore).length).toEqual(2)
+        })
+        it('Prevents infinite recursion with cyclically referencing nodes the other direction', async () => {
+            const cyclicNode1 = {
+                graphID: 'cyclic_txid1.0',
+                rawTx: 'cyclic_rawtx1',
+                outputIndex: 0,
+                time: 300,
+                txid: 'cyclic_txid1',
+                inputs: {
+                    'cyclic_txid2.0': {
+                        graphID: 'cyclic_txid2.0',
+                        rawTx: 'deadbeef2024',
+                        outputIndex: 0,
+                        time: 300,
+                        txid: 'cyclic_txid2',
+                        inputs: {
+                            'cyclic_txid1.0': {
+                                graphID: 'cyclic_txid1.0',
+                                rawTx: 'cyclic_rawtx1',
+                                outputIndex: 0,
+                                time: 300,
+                                txid: 'cyclic_txid1',
+                                inputs: {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            const storage1 = new MockStorage()
+            const storage2 = new MockStorage([cyclicNode1])
+
+            storage1.findNeededInputs = jest.fn().mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                return {
+                    requestedInputs: {
+                        'cyclic_txid2.0': {
+                            metadata: true
+                        }
+                    }
+                }
+            }).mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                return {
+                    requestedInputs: {
+                        'cyclic_txid1.0': {
+                            metadata: true
+                        }
+                    }
+                }
+            }).mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                return {
+                    requestedInputs: {
+                        'cyclic_txid2.0': {
+                            metadata: true
+                        }
+                    }
+                }
+            })
+            storage2.hydrateGASPNode = jest.fn()
+                .mockReturnValueOnce(cyclicNode1)
+                .mockReturnValueOnce(cyclicNode1.inputs['cyclic_txid2.0'])
+                .mockReturnValueOnce(cyclicNode1)
+                .mockReturnValueOnce(cyclicNode1.inputs['cyclic_txid2.0'])
+
+            const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+            const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+            gasp1.remote = gasp2
+            await gasp1.sync()
+
+            // This direction, the UTXO does sync because the recipient is able to proceed to graph finalization after refusing to process duplicative data.
+            expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
+            expect(await storage1.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
+            expect(storage1.appendToGraph).toHaveBeenCalledTimes(2)
+        })
+        it('Prevents infinite recursion with complex cyclic dependencies', async () => {
+            const cyclicNodeA = {
+                graphID: 'cyclicA_txid.0',
+                rawTx: 'cyclicA_rawtx',
+                outputIndex: 0,
+                time: 300,
+                txid: 'cyclicA_txid',
+                inputs: {
+                    'cyclicB_txid.0': {
+                        graphID: 'cyclicB_txid.0',
+                        rawTx: 'cyclicB_rawtx',
+                        outputIndex: 0,
+                        time: 300,
+                        txid: 'cyclicB_txid',
+                        inputs: {
+                            'cyclicA_txid.0': {
+                                graphID: 'cyclicA_txid.0',
+                                rawTx: 'cyclicA_rawtx',
+                                outputIndex: 0,
+                                time: 300,
+                                txid: 'cyclicA_txid',
+                                inputs: {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            const cyclicNodeB = {
+                graphID: 'cyclicB_txid.0',
+                rawTx: 'cyclicB_rawtx',
+                outputIndex: 0,
+                time: 300,
+                txid: 'cyclicB_txid',
+                inputs: {
+                    'cyclicC_txid.0': {
+                        graphID: 'cyclicC_txid.0',
+                        rawTx: 'cyclicC_rawtx',
+                        outputIndex: 0,
+                        time: 300,
+                        txid: 'cyclicC_txid',
+                        inputs: {
+                            'cyclicA_txid.0': {
+                                graphID: 'cyclicA_txid.0',
+                                rawTx: 'cyclicA_rawtx',
+                                outputIndex: 0,
+                                time: 300,
+                                txid: 'cyclicA_txid',
+                                inputs: {}
+                            }
+                        }
+                    }
+                }
+            };
+
+            const cyclicNodeC = {
+                graphID: 'cyclicC_txid.0',
+                rawTx: 'cyclicC_rawtx',
+                outputIndex: 0,
+                time: 300,
+                txid: 'cyclicC_txid',
+                inputs: {
+                    'cyclicA_txid.0': {
+                        graphID: 'cyclicA_txid.0',
+                        rawTx: 'cyclicA_rawtx',
+                        outputIndex: 0,
+                        time: 300,
+                        txid: 'cyclicA_txid',
+                        inputs: {}
+                    }
+                }
+            };
+
+            const storage1 = new MockStorage([cyclicNodeA]);
+            const storage2 = new MockStorage();
+
+            storage2.findNeededInputs = jest.fn()
+                .mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                    return {
+                        requestedInputs: {
+                            'cyclicB_txid.0': {
+                                metadata: true
+                            }
+                        }
+                    };
+                })
+                .mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                    return {
+                        requestedInputs: {
+                            'cyclicC_txid.0': {
+                                metadata: true
+                            }
+                        }
+                    };
+                })
+                .mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                    return {
+                        requestedInputs: {
+                            'cyclicA_txid.0': {
+                                metadata: true
+                            }
+                        }
+                    };
+                });
+
+            storage1.hydrateGASPNode = jest.fn()
+                .mockReturnValueOnce(cyclicNodeA)
+                .mockReturnValueOnce(cyclicNodeB)
+                .mockReturnValueOnce(cyclicNodeC)
+                .mockReturnValueOnce(cyclicNodeA);
+
+            const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+            const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+            gasp1.remote = gasp2;
+
+            await gasp1.sync();
+
+            expect((await storage2.findKnownUTXOs(0)).length).toBe(0);
+            expect(await storage2.findKnownUTXOs(0)).not.toEqual(await storage1.findKnownUTXOs(0));
+            expect(storage2.appendToGraph).toHaveBeenCalledTimes(3);
+            expect(Object.keys(storage2.tempGraphStore).length).toEqual(3);
+        })
+
+        it('Prevents infinite recursion with complex cyclic dependencies in the other direction', async () => {
+            const cyclicNodeA = {
+                graphID: 'cyclicA_txid.0',
+                rawTx: 'cyclicA_rawtx',
+                outputIndex: 0,
+                time: 300,
+                txid: 'cyclicA_txid',
+                inputs: {
+                    'cyclicB_txid.0': {
+                        graphID: 'cyclicB_txid.0',
+                        rawTx: 'cyclicB_rawtx',
+                        outputIndex: 0,
+                        time: 300,
+                        txid: 'cyclicB_txid',
+                        inputs: {
+                            'cyclicA_txid.0': {
+                                graphID: 'cyclicA_txid.0',
+                                rawTx: 'cyclicA_rawtx',
+                                outputIndex: 0,
+                                time: 300,
+                                txid: 'cyclicA_txid',
+                                inputs: {}
+                            }
+                        }
+                    }
+                }
+            };
+
+            const cyclicNodeB = {
+                graphID: 'cyclicB_txid.0',
+                rawTx: 'cyclicB_rawtx',
+                outputIndex: 0,
+                time: 300,
+                txid: 'cyclicB_txid',
+                inputs: {
+                    'cyclicC_txid.0': {
+                        graphID: 'cyclicC_txid.0',
+                        rawTx: 'cyclicC_rawtx',
+                        outputIndex: 0,
+                        time: 300,
+                        txid: 'cyclicC_txid',
+                        inputs: {
+                            'cyclicA_txid.0': {
+                                graphID: 'cyclicA_txid.0',
+                                rawTx: 'cyclicA_rawtx',
+                                outputIndex: 0,
+                                time: 300,
+                                txid: 'cyclicA_txid',
+                                inputs: {}
+                            }
+                        }
+                    }
+                }
+            };
+
+            const cyclicNodeC = {
+                graphID: 'cyclicC_txid.0',
+                rawTx: 'cyclicC_rawtx',
+                outputIndex: 0,
+                time: 300,
+                txid: 'cyclicC_txid',
+                inputs: {
+                    'cyclicA_txid.0': {
+                        graphID: 'cyclicA_txid.0',
+                        rawTx: 'cyclicA_rawtx',
+                        outputIndex: 0,
+                        time: 300,
+                        txid: 'cyclicA_txid',
+                        inputs: {}
+                    }
+                }
+            };
+
+            const storage1 = new MockStorage();
+            const storage2 = new MockStorage([cyclicNodeA]);
+
+            storage1.findNeededInputs = jest.fn()
+                .mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                    return {
+                        requestedInputs: {
+                            'cyclicB_txid.0': {
+                                metadata: true
+                            }
+                        }
+                    };
+                })
+                .mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                    return {
+                        requestedInputs: {
+                            'cyclicC_txid.0': {
+                                metadata: true
+                            }
+                        }
+                    };
+                })
+                .mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+                    return {
+                        requestedInputs: {
+                            'cyclicA_txid.0': {
+                                metadata: true
+                            }
+                        }
+                    };
+                });
+
+            storage2.hydrateGASPNode = jest.fn()
+                .mockReturnValueOnce(cyclicNodeA)
+                .mockReturnValueOnce(cyclicNodeB)
+                .mockReturnValueOnce(cyclicNodeC)
+                .mockReturnValueOnce(cyclicNodeA);
+
+            const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+            const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+            gasp1.remote = gasp2;
+
+            await gasp1.sync();
+
+            expect((await storage1.findKnownUTXOs(0)).length).toBe(1);
+            expect(await storage1.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0));
+            expect(storage1.appendToGraph).toHaveBeenCalledTimes(3);
+        })
+    })
 })

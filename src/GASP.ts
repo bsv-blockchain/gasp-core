@@ -153,12 +153,19 @@ export class GASP implements GASPRemote {
     this.version = 1
     this.logPrefix = logPrefix
     this.log = log
+    this.validateTimestamp(this.lastInteraction)
     this.logData(`GASP initialized with version: ${this.version}, lastInteraction: ${this.lastInteraction}`)
   }
 
   private logData(...data: any): void {
     if (this.log) {
       console.log(this.logPrefix, ...data)
+    }
+  }
+
+  private validateTimestamp(timestamp: number): void {
+    if (typeof timestamp !== 'number' || isNaN(timestamp) || timestamp < 0 || !Number.isInteger(timestamp)) {
+      throw new Error('Invalid timestamp format')
     }
   }
 
@@ -212,16 +219,20 @@ export class GASP implements GASPRemote {
       await Promise.all(initialResponse.UTXOList
         .filter(x => !foreignUTXOs.some(y => x.txid === y.txid && x.outputIndex === y.outputIndex))
         .map(async UTXO => {
-          this.logData(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
-          const resolvedNode = await this.remote.requestNode(
-            this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
-            UTXO.txid,
-            UTXO.outputIndex,
-            true
-          )
-          this.logData(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
-          await this.processIncomingNode(resolvedNode)
-          await this.completeGraph(resolvedNode.graphID)
+          try {
+            this.logData(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
+            const resolvedNode = await this.remote.requestNode(
+              this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
+              UTXO.txid,
+              UTXO.outputIndex,
+              true
+            )
+            this.logData(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
+            await this.processIncomingNode(resolvedNode)
+            await this.completeGraph(resolvedNode.graphID)
+          } catch (e) {
+            this.logData(`Error with incoming UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
+          }
         })
       )
     }
@@ -231,15 +242,19 @@ export class GASP implements GASPRemote {
 
     if (initialReply.UTXOList.length > 0) {
       await Promise.all(initialReply.UTXOList.map(async UTXO => {
-        this.logData(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
-        const outgoingNode = await this.storage.hydrateGASPNode(
-          this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
-          UTXO.txid,
-          UTXO.outputIndex,
-          true
-        )
-        this.logData(`Sending unspent graph node for remote: ${JSON.stringify(outgoingNode)}`)
-        await this.processOutgoingNode(outgoingNode)
+        try {
+          this.logData(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
+          const outgoingNode = await this.storage.hydrateGASPNode(
+            this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
+            UTXO.txid,
+            UTXO.outputIndex,
+            true
+          )
+          this.logData(`Sending unspent graph node for remote: ${JSON.stringify(outgoingNode)}`)
+          await this.processOutgoingNode(outgoingNode)
+        } catch (e) {
+          this.logData(`Error with outgoing UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
+        }
       }))
     }
     this.logData('Sync completed!')
@@ -274,6 +289,7 @@ export class GASP implements GASPRemote {
       console.error(`GASP version mismatch error: ${error.message}`)
       throw error
     }
+    this.validateTimestamp(request.since)
     const response = {
       since: this.lastInteraction,
       UTXOList: await this.storage.findKnownUTXOs(request.since)
