@@ -1,7 +1,7 @@
 {
-  "name": "gasp-protocol",
-  "version": "1.0.0",
-  "description": "Graph Aware Sync Protocol for synchronizing transaction data between two parties in a blockchain environment.",
+  "name": "@bsv/gasp",
+  "version": "0.1.0",
+  "description": "Graph Aware Sync Protocol",
   "main": "dist/bundle.cjs.js",
   "module": "dist/bundle.esm.js",
   "types": "dist/index.d.ts",
