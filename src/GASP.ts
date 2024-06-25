@@ -208,18 +208,22 @@ export class GASP implements GASPRemote {
     const initialRequest = await this.buildInitialRequest(this.lastInteraction)
     const initialResponse = await this.remote.getInitialResponse(initialRequest)
     if (initialResponse.UTXOList.length > 0) {
-      await Promise.all(initialResponse.UTXOList.map(async UTXO => {
-        this.logData(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
-        const resolvedNode = await this.remote.requestNode(
-          this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
-          UTXO.txid,
-          UTXO.outputIndex,
-          true
-        )
-        this.logData(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
-        await this.processIncomingNode(resolvedNode)
-        await this.completeGraph(resolvedNode.graphID)
-      }))
+      const foreignUTXOs = await this.storage.findKnownUTXOs(0)
+      await Promise.all(initialResponse.UTXOList
+        .filter(x => !foreignUTXOs.some(y => x.txid === y.txid && x.outputIndex === y.outputIndex))
+        .map(async UTXO => {
+          this.logData(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
+          const resolvedNode = await this.remote.requestNode(
+            this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
+            UTXO.txid,
+            UTXO.outputIndex,
+            true
+          )
+          this.logData(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
+          await this.processIncomingNode(resolvedNode)
+          await this.completeGraph(resolvedNode.graphID)
+        })
+      )
     }
 
     const initialReply = await this.getInitialReply(initialResponse)

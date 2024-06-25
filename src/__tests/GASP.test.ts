@@ -299,7 +299,12 @@ describe('GASP', () => {
                 requestedInputs: {
                     'mock_sender1_txid2.0': {
                         metadata: true
-                    },
+                    }
+                }
+            }
+        }).mockImplementationOnce(async (n: GASPNode): Promise<GASPNodeResponse> => {
+            return {
+                requestedInputs: {
                     'recursive_txid.1': {
                         metadata: true
                     }
@@ -348,5 +353,18 @@ describe('GASP', () => {
         const syncedUTXOs = await storage2.findKnownUTXOs(0)
         expect(syncedUTXOs.length).toBe(1)
         expect(syncedUTXOs).toEqual([{ txid: 'new_txid', outputIndex: 1 }])
+    })
+    it('Will not sync unnecessary graphs', async () => {
+        const storage1 = new MockStorage([mockUTXO])
+        const storage2 = new MockStorage([mockUTXO])
+        const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
+        const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
+        gasp1.remote = gasp2
+        await gasp1.sync()
+        expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
+        expect((await storage2.findKnownUTXOs(0)).length).toBe(1)
+        expect(storage1.finalizeGraph).not.toHaveBeenCalled()
+        expect(storage2.finalizeGraph).not.toHaveBeenCalled()
+        expect(await storage2.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
     })
 })
