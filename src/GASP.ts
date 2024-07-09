@@ -362,7 +362,7 @@ export class GASP implements GASPRemote {
    * @param spentBy The 36-byte structure of the node that spent this one, if applicable.
    */
   private async processIncomingNode(node: GASPNode, spentBy?: string, seenNodes = new Set()): Promise<void> {
-    const nodeId = `${node.rawTx}.${node.outputIndex}`
+    const nodeId = `${this.computeTXID(node.rawTx)}.${node.outputIndex}`
     this.logData(`Processing incoming node: ${JSON.stringify(node)}, spentBy: ${spentBy}`)
     if (seenNodes.has(nodeId)) {
       this.logData(`Node ${nodeId} already processed, skipping.`)
