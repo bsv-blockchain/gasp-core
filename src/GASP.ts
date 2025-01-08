@@ -139,22 +139,34 @@ export class GASP implements GASPRemote {
   lastInteraction: number
   logPrefix: string
   log: boolean
+  unidirectional: boolean
 
   /**
    * 
    * @param storage The GASP Storage interface to use
    * @param remote The GASP Remote interface to use
    * @param lastInteraction The timestamp when we last interacted with this remote party
+   * @param logPrefix Optional prefix for log messages
+   * @param log Whether to log messages
+   * @param unidirectional Whether to disable the "reply" side and do pull-only
    */
-  constructor(storage: GASPStorage, remote: GASPRemote, lastInteraction = 0, logPrefix = '[GASP] ', log = false) {
+  constructor(
+    storage: GASPStorage,
+    remote: GASPRemote,
+    lastInteraction = 0,
+    logPrefix = '[GASP] ',
+    log = false,
+    unidirectional = false
+  ) {
     this.storage = storage
     this.remote = remote
     this.lastInteraction = lastInteraction
     this.version = 1
     this.logPrefix = logPrefix
     this.log = log
+    this.unidirectional = unidirectional
     this.validateTimestamp(this.lastInteraction)
-    this.logData(`GASP initialized with version: ${this.version}, lastInteraction: ${this.lastInteraction}`)
+    this.logData(`GASP initialized with version: ${this.version}, lastInteraction: ${this.lastInteraction}, unidirectional: ${this.unidirectional}`)
   }
 
   private logData(...data: any): void {
@@ -199,8 +211,8 @@ export class GASP implements GASPRemote {
   /**
    * Computes the transaction ID for a given transaction.
    * @param tx The transaction string.
-     * @returns The computed transaction ID.
-     */
+   * @returns The computed transaction ID.
+   */
   private computeTXID(tx: string): string {
     const txid = Transaction.fromHex(tx).id('hex')
     this.logData(`Computed TXID: ${txid} from transaction: ${tx}`)
@@ -214,6 +226,8 @@ export class GASP implements GASPRemote {
     this.logData(`Starting sync process. Last interaction timestamp: ${this.lastInteraction}`)
     const initialRequest = await this.buildInitialRequest(this.lastInteraction)
     const initialResponse = await this.remote.getInitialResponse(initialRequest)
+
+    // 1. Pull the remote UTXOs that we don't already have
     if (initialResponse.UTXOList.length > 0) {
       const foreignUTXOs = await this.storage.findKnownUTXOs(0)
       await Promise.all(initialResponse.UTXOList
@@ -237,33 +251,37 @@ export class GASP implements GASPRemote {
       )
     }
 
-    const initialReply = await this.getInitialReply(initialResponse)
-    this.logData(`Received initial reply: ${JSON.stringify(initialReply)}`)
+    // 2. Only do the “reply” half if unidirectional is disabled
+    if (!this.unidirectional) {
+      const initialReply = await this.getInitialReply(initialResponse)
+      this.logData(`Received initial reply: ${JSON.stringify(initialReply)}`)
 
-    if (initialReply.UTXOList.length > 0) {
-      await Promise.all(initialReply.UTXOList.map(async UTXO => {
-        try {
-          this.logData(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
-          const outgoingNode = await this.storage.hydrateGASPNode(
-            this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
-            UTXO.txid,
-            UTXO.outputIndex,
-            true
-          )
-          this.logData(`Sending unspent graph node for remote: ${JSON.stringify(outgoingNode)}`)
-          await this.processOutgoingNode(outgoingNode)
-        } catch (e) {
-          this.logData(`Error with outgoing UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
-        }
-      }))
+      if (initialReply.UTXOList.length > 0) {
+        await Promise.all(initialReply.UTXOList.map(async UTXO => {
+          try {
+            this.logData(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
+            const outgoingNode = await this.storage.hydrateGASPNode(
+              this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
+              UTXO.txid,
+              UTXO.outputIndex,
+              true
+            )
+            this.logData(`Sending unspent graph node for remote: ${JSON.stringify(outgoingNode)}`)
+            await this.processOutgoingNode(outgoingNode)
+          } catch (e) {
+            this.logData(`Error with outgoing UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
+          }
+        }))
+      }
     }
+
     this.logData('Sync completed!')
   }
 
   /**
-  * Builds the initial request for the sync process.
-  * @returns A promise for the initial request object.
-  */
+   * Builds the initial request for the sync process.
+   * @returns A promise for the initial request object.
+   */
   async buildInitialRequest(since: number): Promise<GASPInitialRequest> {
     const request = {
       version: this.version,
@@ -388,6 +406,11 @@ export class GASP implements GASPRemote {
    * @param node The outgoing GASP node.
    */
   private async processOutgoingNode(node: GASPNode, seenNodes = new Set()): Promise<void> {
+    if (this.unidirectional) {
+      this.logData(`Skipping outgoing node processing in unidirectional mode.`)
+      return
+    }
+
     const nodeId = `${this.computeTXID(node.rawTx)}.${node.outputIndex}`
     this.logData(`Processing outgoing node: ${JSON.stringify(node)}`)
     if (seenNodes.has(nodeId)) {
@@ -395,6 +418,8 @@ export class GASP implements GASPRemote {
       return // Prevent infinite recursion
     }
     seenNodes.add(nodeId)
+
+    // Attempt to submit the node to the remote
     const response = await this.remote.submitNode(node)
     this.logData(`Received response for submitted node: ${JSON.stringify(response)}`)
     if (response) {

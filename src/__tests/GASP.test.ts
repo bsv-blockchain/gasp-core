@@ -813,4 +813,105 @@ describe('GASP', () => {
             expect(storage1.appendToGraph).toHaveBeenCalledTimes(3);
         })
     })
+
+    describe('Unidirectional Sync Tests', () => {
+        it('Pull-only from Bob to Alice (Alice is unidirectional client)', async () => {
+            // Alice has a UTXO that Bob does not have
+            const aliceUTXO = {
+                graphID: 'alice_txid.0',
+                rawTx: 'alice_rawtx',
+                outputIndex: 0,
+                time: 999,
+                txid: 'alice_txid',
+                inputs: {}
+            }
+
+            // Bob has a UTXO that Alice does not have
+            const bobUTXO = {
+                graphID: 'bob_txid.1',
+                rawTx: 'bob_rawtx',
+                outputIndex: 1,
+                time: 1000,
+                txid: 'bob_txid',
+                inputs: {}
+            }
+
+            // Alice's storage
+            const storageAlice = new MockStorage([aliceUTXO])
+
+            // Bob's storage
+            const storageBob = new MockStorage([bobUTXO])
+
+            // Alice is the one calling sync() with unidirectional = true,
+            // meaning "pull-only from Bob's perspective"
+            const gaspAlice = new GASP(storageAlice, throwawayRemote, 0, '[GASP-Alice] ', false, true)
+            // Bob is normal, but he doesn't call `sync`. He is the remote from Alice's perspective
+            const gaspBob = new GASP(storageBob, gaspAlice, 0, '[GASP-Bob] ')
+
+            // Alice uses Bob as the remote
+            gaspAlice.remote = gaspBob
+
+            // Let Alice do a unidirectional sync from Bob
+            await gaspAlice.sync()
+
+            // Expect that Bob's UTXO has arrived in Alice's store
+            expect((await storageAlice.findKnownUTXOs(0))).toEqual([
+                { txid: 'alice_txid', outputIndex: 0 },
+                { txid: 'bob_txid', outputIndex: 1 }
+            ])
+
+            // But, Bob does NOT get Alice's UTXO, because unidirectional means no "reply" from Alice
+            expect((await storageBob.findKnownUTXOs(0))).toEqual([
+                { txid: 'bob_txid', outputIndex: 1 }
+            ])
+        })
+
+        it('Pull-only from Alice to Bob (Bob is unidirectional client)', async () => {
+            // Alice has a UTXO that Bob does not have
+            const aliceUTXO = {
+                graphID: 'alice_txid.0',
+                rawTx: 'alice_rawtx',
+                outputIndex: 0,
+                time: 999,
+                txid: 'alice_txid',
+                inputs: {}
+            }
+
+            // Bob has a UTXO that Alice does not have
+            const bobUTXO = {
+                graphID: 'bob_txid.1',
+                rawTx: 'bob_rawtx',
+                outputIndex: 1,
+                time: 1000,
+                txid: 'bob_txid',
+                inputs: {}
+            }
+
+            // Storage for each
+            const storageAlice = new MockStorage([aliceUTXO])
+            const storageBob = new MockStorage([bobUTXO])
+
+            // Bob is the one calling sync() with unidirectional = true
+            // Means Bob only pulls from Alice, but doesn't push his own data
+            const gaspBob = new GASP(storageBob, throwawayRemote, 0, '[GASP-Bob] ', false, true)
+            const gaspAlice = new GASP(storageAlice, gaspBob, 0, '[GASP-Alice] ')
+
+            // Bob uses Alice as his remote
+            gaspBob.remote = gaspAlice
+
+            // Bob does a unidirectional sync from Alice
+            await gaspBob.sync()
+
+            // Expect that Alice's UTXO has arrived in Bob's store
+            expect((await storageBob.findKnownUTXOs(0))).toEqual([
+                { txid: 'bob_txid', outputIndex: 1 },
+                { txid: 'alice_txid', outputIndex: 0 }
+            ])
+
+            // But, Alice does NOT get Bob's UTXO, because Bob never pushes it in unidirectional mode
+            expect((await storageAlice.findKnownUTXOs(0))).toEqual([
+                { txid: 'alice_txid', outputIndex: 0 }
+            ])
+        })
+    })
 })
