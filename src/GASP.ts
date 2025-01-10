@@ -130,6 +130,17 @@ export class GASPVersionMismatchError extends Error {
 }
 
 /**
+ * Log levels for controlling output verbosity.
+ */
+export enum LogLevel {
+  NONE = 0,
+  ERROR = 1,
+  WARN = 2,
+  INFO = 3,
+  DEBUG = 4
+}
+
+/**
  * Main class implementing the Graph Aware Sync Protocol.
  */
 export class GASP implements GASPRemote {
@@ -137,18 +148,35 @@ export class GASP implements GASPRemote {
   storage: GASPStorage
   remote: GASPRemote
   lastInteraction: number
-  logPrefix: string
+
+  /**
+   * @deprecated Retained for backwards compatibility. Use `logLevel` and the new logging methods instead.
+   */
   log: boolean
+
+  /**
+   * The log level: NONE, ERROR, WARN, INFO, DEBUG.
+   */
+  logLevel: LogLevel
+
+  logPrefix: string
   unidirectional: boolean
 
   /**
-   * 
+   * When true, run tasks sequentially rather than using Promise.all (parallel).
+   */
+  sequential: boolean
+
+  /**
+   *
    * @param storage The GASP Storage interface to use
    * @param remote The GASP Remote interface to use
    * @param lastInteraction The timestamp when we last interacted with this remote party
    * @param logPrefix Optional prefix for log messages
-   * @param log Whether to log messages
+   * @param log Whether to log messages (backwards-compatibility only)
    * @param unidirectional Whether to disable the "reply" side and do pull-only
+   * @param logLevel The log level for the instance
+   * @param sequential Whether to run tasks sequentially (avoid Promise.all) or in parallel
    */
   constructor(
     storage: GASPStorage,
@@ -156,7 +184,9 @@ export class GASP implements GASPRemote {
     lastInteraction = 0,
     logPrefix = '[GASP] ',
     log = false,
-    unidirectional = false
+    unidirectional = false,
+    logLevel: LogLevel = LogLevel.INFO,
+    sequential = false
   ) {
     this.storage = storage
     this.remote = remote
@@ -165,13 +195,66 @@ export class GASP implements GASPRemote {
     this.logPrefix = logPrefix
     this.log = log
     this.unidirectional = unidirectional
+    this.logLevel = logLevel
+    this.sequential = sequential
+
     this.validateTimestamp(this.lastInteraction)
-    this.logData(`GASP initialized with version: ${this.version}, lastInteraction: ${this.lastInteraction}, unidirectional: ${this.unidirectional}`)
+    this.logData(`GASP initialized with version: ${this.version}, lastInteraction: ${this.lastInteraction}, unidirectional: ${this.unidirectional}, logLevel: ${LogLevel[this.logLevel]}, sequential: ${this.sequential}`)
   }
 
+  /**
+   * Helper method to execute callbacks either in parallel or sequentially, 
+   * depending on the `sequential` flag.
+   */
+  private async runConcurrently<T>(
+    items: T[],
+    callback: (item: T) => Promise<void>
+  ): Promise<void> {
+    if (this.sequential) {
+      // Run sequentially
+      for (const item of items) {
+        await callback(item)
+      }
+    } else {
+      // Run in parallel
+      await Promise.all(items.map(callback))
+    }
+  }
+
+  /**
+   * Legacy log method for backwards compatibility only.  
+   * Internally, logs at INFO level if `log === true`.
+   */
   private logData(...data: any): void {
     if (this.log) {
-      console.log(this.logPrefix, ...data)
+      this.infoLog(...data)
+    }
+  }
+
+  /**
+   * New recommended methods for logging, respecting the logLevel.
+   */
+  private errorLog(...data: any): void {
+    if (this.logLevel >= LogLevel.ERROR) {
+      console.error(this.logPrefix, '[ERROR]', ...data)
+    }
+  }
+
+  private warnLog(...data: any): void {
+    if (this.logLevel >= LogLevel.WARN) {
+      console.warn(this.logPrefix, '[WARN]', ...data)
+    }
+  }
+
+  private infoLog(...data: any): void {
+    if (this.logLevel >= LogLevel.INFO) {
+      console.info(this.logPrefix, '[INFO]', ...data)
+    }
+  }
+
+  private debugLog(...data: any): void {
+    if (this.logLevel >= LogLevel.DEBUG) {
+      console.debug(this.logPrefix, '[DEBUG]', ...data)
     }
   }
 
@@ -189,7 +272,7 @@ export class GASP implements GASPRemote {
    */
   private compute36ByteStructure(txid: string, index: number): string {
     const result = `${txid}.${index.toString()}`
-    this.logData(`Computed 36-byte structure: ${result} from txid: ${txid}, index: ${index}`)
+    this.debugLog(`Computed 36-byte structure: ${result} from txid: ${txid}, index: ${index}`)
     return result
   }
 
@@ -204,7 +287,7 @@ export class GASP implements GASPRemote {
       txid,
       outputIndex: parseInt(index, 10)
     }
-    this.logData(`Deconstructed 36-byte structure: ${outpoint} into txid: ${txid}, outputIndex: ${result.outputIndex}`)
+    this.debugLog(`Deconstructed 36-byte structure: ${outpoint} into txid: ${txid}, outputIndex: ${result.outputIndex}`)
     return result
   }
 
@@ -215,7 +298,7 @@ export class GASP implements GASPRemote {
    */
   private computeTXID(tx: string): string {
     const txid = Transaction.fromHex(tx).id('hex')
-    this.logData(`Computed TXID: ${txid} from transaction: ${tx}`)
+    this.debugLog(`Computed TXID: ${txid} from transaction: ${tx}`)
     return txid
   }
 
@@ -223,59 +306,62 @@ export class GASP implements GASPRemote {
    * Synchronizes the transaction data between the local and remote participants.
    */
   async sync(): Promise<void> {
-    this.logData(`Starting sync process. Last interaction timestamp: ${this.lastInteraction}`)
+    this.infoLog(`Starting sync process. Last interaction timestamp: ${this.lastInteraction}`)
     const initialRequest = await this.buildInitialRequest(this.lastInteraction)
     const initialResponse = await this.remote.getInitialResponse(initialRequest)
 
     // 1. Pull the remote UTXOs that we don't already have
     if (initialResponse.UTXOList.length > 0) {
       const foreignUTXOs = await this.storage.findKnownUTXOs(0)
-      await Promise.all(initialResponse.UTXOList
-        .filter(x => !foreignUTXOs.some(y => x.txid === y.txid && x.outputIndex === y.outputIndex))
-        .map(async UTXO => {
+
+      await this.runConcurrently(
+        initialResponse.UTXOList.filter(x =>
+          !foreignUTXOs.some(y => x.txid === y.txid && x.outputIndex === y.outputIndex)
+        ),
+        async UTXO => {
           try {
-            this.logData(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
+            this.infoLog(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
             const resolvedNode = await this.remote.requestNode(
               this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
               UTXO.txid,
               UTXO.outputIndex,
               true
             )
-            this.logData(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
+            this.debugLog(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
             await this.processIncomingNode(resolvedNode)
             await this.completeGraph(resolvedNode.graphID)
           } catch (e) {
-            this.logData(`Error with incoming UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
+            this.warnLog(`Error with incoming UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
           }
-        })
+        }
       )
     }
 
     // 2. Only do the “reply” half if unidirectional is disabled
     if (!this.unidirectional) {
       const initialReply = await this.getInitialReply(initialResponse)
-      this.logData(`Received initial reply: ${JSON.stringify(initialReply)}`)
+      this.infoLog(`Received initial reply: ${JSON.stringify(initialReply)}`)
 
       if (initialReply.UTXOList.length > 0) {
-        await Promise.all(initialReply.UTXOList.map(async UTXO => {
+        await this.runConcurrently(initialReply.UTXOList, async UTXO => {
           try {
-            this.logData(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
+            this.infoLog(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
             const outgoingNode = await this.storage.hydrateGASPNode(
               this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
               UTXO.txid,
               UTXO.outputIndex,
               true
             )
-            this.logData(`Sending unspent graph node for remote: ${JSON.stringify(outgoingNode)}`)
+            this.debugLog(`Sending unspent graph node for remote: ${JSON.stringify(outgoingNode)}`)
             await this.processOutgoingNode(outgoingNode)
           } catch (e) {
-            this.logData(`Error with outgoing UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
+            this.warnLog(`Error with outgoing UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
           }
-        }))
+        })
       }
     }
 
-    this.logData('Sync completed!')
+    this.infoLog('Sync completed!')
   }
 
   /**
@@ -287,7 +373,7 @@ export class GASP implements GASPRemote {
       version: this.version,
       since
     }
-    this.logData(`Built initial request: ${JSON.stringify(request)}`)
+    this.debugLog(`Built initial request: ${JSON.stringify(request)}`)
     return request
   }
 
@@ -297,14 +383,14 @@ export class GASP implements GASPRemote {
    * @returns A promise for an initial response
    */
   async getInitialResponse(request: GASPInitialRequest): Promise<GASPInitialResponse> {
-    this.logData(`Received initial request: ${JSON.stringify(request)}`)
+    this.infoLog(`Received initial request: ${JSON.stringify(request)}`)
     if (request.version !== this.version) {
       const error = new GASPVersionMismatchError(
         `GASP version mismatch. Current version: ${this.version}, foreign version: ${request.version}`,
         this.version,
         request.version
       )
-      console.error(`GASP version mismatch error: ${error.message}`)
+      this.errorLog(`GASP version mismatch error: ${error.message}`)
       throw error
     }
     this.validateTimestamp(request.since)
@@ -312,7 +398,7 @@ export class GASP implements GASPRemote {
       since: this.lastInteraction,
       UTXOList: await this.storage.findKnownUTXOs(request.since)
     }
-    this.logData(`Built initial response: ${JSON.stringify(response)}`)
+    this.debugLog(`Built initial response: ${JSON.stringify(response)}`)
     return response
   }
 
@@ -322,13 +408,15 @@ export class GASP implements GASPRemote {
    * @returns A promise for an initial reply
    */
   async getInitialReply(response: GASPInitialResponse): Promise<GASPInitialReply> {
-    this.logData(`Received initial response: ${JSON.stringify(response)}`)
+    this.infoLog(`Received initial response: ${JSON.stringify(response)}`)
     const knownUTXOs = await this.storage.findKnownUTXOs(response.since)
-    const filteredUTXOs = knownUTXOs.filter(x => !response.UTXOList.some(y => y.txid === x.txid && y.outputIndex === x.outputIndex))
+    const filteredUTXOs = knownUTXOs.filter(
+      x => !response.UTXOList.some(y => y.txid === x.txid && y.outputIndex === x.outputIndex)
+    )
     const reply = {
       UTXOList: filteredUTXOs
     }
-    this.logData(`Built initial reply: ${JSON.stringify(reply)}`)
+    this.debugLog(`Built initial reply: ${JSON.stringify(reply)}`)
     return reply
   }
 
@@ -336,9 +424,9 @@ export class GASP implements GASPRemote {
    * Provides a requested node to a foreign instance who requested it.
    */
   async requestNode(graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
-    this.logData(`Remote is requesting node with graphID: ${graphID}, txid: ${txid}, outputIndex: ${outputIndex}, metadata: ${metadata}`)
+    this.infoLog(`Remote is requesting node with graphID: ${graphID}, txid: ${txid}, outputIndex: ${outputIndex}, metadata: ${metadata}`)
     const node = await this.storage.hydrateGASPNode(graphID, txid, outputIndex, metadata)
-    this.logData(`Returning node: ${JSON.stringify(node)}`)
+    this.debugLog(`Returning node: ${JSON.stringify(node)}`)
     return node
   }
 
@@ -347,10 +435,10 @@ export class GASP implements GASPRemote {
    * Also finalizes or discards a graph if no additional data is requested from the foreign instance.
    */
   async submitNode(node: GASPNode): Promise<GASPNodeResponse | void> {
-    this.logData(`Remote party is submitting node: ${JSON.stringify(node)}`)
+    this.infoLog(`Remote party is submitting node: ${JSON.stringify(node)}`)
     await this.storage.appendToGraph(node)
     const requestedInputs = await this.storage.findNeededInputs(node)
-    this.logData(`Requested inputs: ${JSON.stringify(requestedInputs)}`)
+    this.debugLog(`Requested inputs: ${JSON.stringify(requestedInputs)}`)
     if (!requestedInputs) {
       await this.completeGraph(node.graphID)
     }
@@ -362,14 +450,14 @@ export class GASP implements GASPRemote {
    * @param {string} graphID The ID of the newly-synced graph
    */
   async completeGraph(graphID: string): Promise<void> {
-    this.logData(`Completing newly-synced graph: ${graphID}`)
+    this.infoLog(`Completing newly-synced graph: ${graphID}`)
     try {
       await this.storage.validateGraphAnchor(graphID)
-      this.logData(`Graph validated for node: ${graphID}`)
+      this.debugLog(`Graph validated for node: ${graphID}`)
       await this.storage.finalizeGraph(graphID)
-      this.logData(`Graph finalized for node: ${graphID}`)
+      this.infoLog(`Graph finalized for node: ${graphID}`)
     } catch (e) {
-      this.logData(`Error validating graph: ${(e as Error).message}. Discarding graph for node: ${graphID}`)
+      this.warnLog(`Error validating graph: ${(e as Error).message}. Discarding graph for node: ${graphID}`)
       await this.storage.discardGraph(graphID)
     }
   }
@@ -381,23 +469,30 @@ export class GASP implements GASPRemote {
    */
   private async processIncomingNode(node: GASPNode, spentBy?: string, seenNodes = new Set()): Promise<void> {
     const nodeId = `${this.computeTXID(node.rawTx)}.${node.outputIndex}`
-    this.logData(`Processing incoming node: ${JSON.stringify(node)}, spentBy: ${spentBy}`)
+    this.debugLog(`Processing incoming node: ${JSON.stringify(node)}, spentBy: ${spentBy}`)
     if (seenNodes.has(nodeId)) {
-      this.logData(`Node ${nodeId} already processed, skipping.`)
+      this.debugLog(`Node ${nodeId} already processed, skipping.`)
       return // Prevent infinite recursion
     }
     seenNodes.add(nodeId)
     await this.storage.appendToGraph(node, spentBy)
     const neededInputs = await this.storage.findNeededInputs(node)
-    this.logData(`Needed inputs for node ${nodeId}: ${JSON.stringify(neededInputs)}`)
+    this.debugLog(`Needed inputs for node ${nodeId}: ${JSON.stringify(neededInputs)}`)
     if (neededInputs) {
-      await Promise.all(Object.entries(neededInputs.requestedInputs).map(async ([outpoint, { metadata }]) => {
-        const { txid, outputIndex } = this.deconstruct36ByteStructure(outpoint)
-        this.logData(`Requesting new node for txid: ${txid}, outputIndex: ${outputIndex}, metadata: ${metadata}`)
-        const newNode = await this.remote.requestNode(node.graphID, txid, outputIndex, metadata)
-        this.logData(`Received new node: ${JSON.stringify(newNode)}`)
-        await this.processIncomingNode(newNode, this.compute36ByteStructure(this.computeTXID(node.rawTx), node.outputIndex), seenNodes)
-      }))
+      await this.runConcurrently(
+        Object.entries(neededInputs.requestedInputs),
+        async ([outpoint, { metadata }]) => {
+          const { txid, outputIndex } = this.deconstruct36ByteStructure(outpoint)
+          this.infoLog(`Requesting new node for txid: ${txid}, outputIndex: ${outputIndex}, metadata: ${metadata}`)
+          const newNode = await this.remote.requestNode(node.graphID, txid, outputIndex, metadata)
+          this.debugLog(`Received new node: ${JSON.stringify(newNode)}`)
+          await this.processIncomingNode(
+            newNode,
+            this.compute36ByteStructure(this.computeTXID(node.rawTx), node.outputIndex),
+            seenNodes
+          )
+        }
+      )
     }
   }
 
@@ -407,35 +502,38 @@ export class GASP implements GASPRemote {
    */
   private async processOutgoingNode(node: GASPNode, seenNodes = new Set()): Promise<void> {
     if (this.unidirectional) {
-      this.logData(`Skipping outgoing node processing in unidirectional mode.`)
+      this.debugLog(`Skipping outgoing node processing in unidirectional mode.`)
       return
     }
 
     const nodeId = `${this.computeTXID(node.rawTx)}.${node.outputIndex}`
-    this.logData(`Processing outgoing node: ${JSON.stringify(node)}`)
+    this.debugLog(`Processing outgoing node: ${JSON.stringify(node)}`)
     if (seenNodes.has(nodeId)) {
-      this.logData(`Node ${nodeId} already processed, skipping.`)
+      this.debugLog(`Node ${nodeId} already processed, skipping.`)
       return // Prevent infinite recursion
     }
     seenNodes.add(nodeId)
 
     // Attempt to submit the node to the remote
     const response = await this.remote.submitNode(node)
-    this.logData(`Received response for submitted node: ${JSON.stringify(response)}`)
+    this.debugLog(`Received response for submitted node: ${JSON.stringify(response)}`)
     if (response) {
-      await Promise.all(Object.entries(response.requestedInputs).map(async ([outpoint, { metadata }]) => {
-        const { txid, outputIndex } = this.deconstruct36ByteStructure(outpoint)
-        try {
-          this.logData(`Hydrating node for txid: ${txid}, outputIndex: ${outputIndex}, metadata: ${metadata}`)
-          const hydratedNode = await this.storage.hydrateGASPNode(node.graphID, txid, outputIndex, metadata)
-          this.logData(`Hydrated node: ${JSON.stringify(hydratedNode)}`)
-          await this.processOutgoingNode(hydratedNode, seenNodes)
-        } catch (e) {
-          this.logData(`Error hydrating node: ${(e as Error).message}`)
-          // If we can't send the outgoing node, we just stop. The remote won't validate the anchor, and their temporary graph will be discarded.
-          return
+      await this.runConcurrently(
+        Object.entries(response.requestedInputs),
+        async ([outpoint, { metadata }]) => {
+          const { txid, outputIndex } = this.deconstruct36ByteStructure(outpoint)
+          try {
+            this.infoLog(`Hydrating node for txid: ${txid}, outputIndex: ${outputIndex}, metadata: ${metadata}`)
+            const hydratedNode = await this.storage.hydrateGASPNode(node.graphID, txid, outputIndex, metadata)
+            this.debugLog(`Hydrated node: ${JSON.stringify(hydratedNode)}`)
+            await this.processOutgoingNode(hydratedNode, seenNodes)
+          } catch (e) {
+            this.errorLog(`Error hydrating node: ${(e as Error).message}`)
+            // If we can't send the outgoing node, we just stop. The remote won't validate the anchor, and their temporary graph will be discarded.
+            return
+          }
         }
-      }))
+      )
     }
   }
 }

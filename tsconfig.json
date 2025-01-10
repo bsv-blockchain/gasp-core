@@ -1,19 +1,17 @@
 {
-    "compilerOptions": {
-        "target": "ES2019",
-        "module": "ESNext",
-        "declaration": true,
-        "outDir": "./dist",
-        "strict": true,
-        "esModuleInterop": true,
-        "skipLibCheck": true,
-        "forceConsistentCasingInFileNames": true
+  "files": [],
+  "compilerOptions": {
+    "esModuleInterop": true
+  },
+  "references": [
+    {
+      "path": "tsconfig.esm.json"
     },
-    "include": [
-        "src"
-    ],
-    "exclude": [
-        "node_modules",
-        "**/*.test.ts"
-    ]
+    {
+      "path": "tsconfig.cjs.json"
+    },
+    {
+      "path": "tsconfig.types.json"
+    }
+  ]
 }

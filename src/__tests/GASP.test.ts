@@ -167,7 +167,7 @@ describe('GASP', () => {
         gasp1.remote = gasp2
         gasp1.version = 2
         await expect(gasp1.sync()).rejects.toThrow(new Error('GASP version mismatch. Current version: 1, foreign version: 2'))
-        expect(console.error).toHaveBeenCalledWith('GASP version mismatch error: GASP version mismatch. Current version: 1, foreign version: 2')
+        expect(console.error).toHaveBeenCalledWith('[GASP #2] ', '[ERROR]', 'GASP version mismatch error: GASP version mismatch. Current version: 1, foreign version: 2')
         console.error = originalError
     })
     it('Synchronizes a single UTXO from Alice to Bob', async () => {
