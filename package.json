@@ -1,6 +1,6 @@
 {
   "name": "@bsv/gasp",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "type": "module",
   "description": "Graph Aware Sync Protocol",
   "main": "dist/cjs/mod.js",
