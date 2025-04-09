@@ -1,4 +1,45 @@
 /* eslint-env jest */
+jest.mock('@bsv/sdk', () => {
+  // Simple hash function to generate a consistent "txid" from a string
+  const mockHash = (input: string): string => {
+    let hash = 0;
+    for (let i = 0; i < input.length; i++) {
+      const char = input.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    // Convert to 32-byte hex string (64 chars), padded with zeros
+    return hash.toString(16).padStart(64, '0');
+  };
+
+  // Mock Transaction class
+  class MockTransaction {
+    private rawTx: string;
+
+    constructor(rawTx: string) {
+      this.rawTx = rawTx;
+    }
+
+    // Mock the id method to return a hex "txid" based on rawTx
+    id(format: 'hex' | 'binary' = 'hex'): string {
+      if (format !== 'hex') {
+        throw new Error('Only hex format is mocked');
+      }
+      // Use the rawTx value to generate a consistent txid
+      return mockHash(this.rawTx);
+    }
+
+    // Static method to create a Transaction from hex
+    static fromHex(hex: string): MockTransaction {
+      return new MockTransaction(hex);
+    }
+  }
+
+  return {
+    Transaction: MockTransaction,
+  };
+});
+
 import { GASP, GASPInitialRequest, GASPNode, GASPNodeResponse, GASPStorage, GASPRemote, GASPInitialReply, GASPInitialResponse } from '../GASP'
 
 type Graph = {
