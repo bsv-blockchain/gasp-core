@@ -362,11 +362,6 @@ export class GASP implements GASPRemote {
         break
       }
 
-      // Add all UTXOs from response to our tracking set
-      for (const utxo of initialResponse.UTXOList) {
-        remoteKnownUTXOs.add(this.compute36ByteStructure(utxo.txid, utxo.outputIndex))
-      }
-
       this.infoLog(`Processing page with ${initialResponse.UTXOList.length} UTXOs (since: ${initialResponse.since})`)
       
       // Find which UTXOs we already have
@@ -379,8 +374,9 @@ export class GASP implements GASPRemote {
         async UTXO => {
           try {
             this.infoLog(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
+            const outpoint = this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex)
             const resolvedNode = await this.remote.requestNode(
-              this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
+              outpoint,
               UTXO.txid,
               UTXO.outputIndex,
               true
@@ -388,6 +384,7 @@ export class GASP implements GASPRemote {
             this.debugLog(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
             await this.processIncomingNode(resolvedNode)
             await this.completeGraph(resolvedNode.graphID)
+            remoteKnownUTXOs.add(outpoint)
           } catch (e) {
             this.warnLog(`Error with incoming UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
           }
