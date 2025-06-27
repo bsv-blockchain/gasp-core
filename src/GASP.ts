@@ -356,9 +356,8 @@ export class GASP implements GASPRemote {
     const sharedOutpoints = new Set<string>()
 
     let initialResponse: GASPInitialResponse
-    // 1. Pull the remote UTXOs that we don't already have, page by page
+    let lastInteraction = this.lastInteraction
     do {
-      let lastInteraction = this.lastInteraction
       const initialRequest = await this.buildInitialRequest(lastInteraction, limit)
       initialResponse = await this.remote.getInitialResponse(initialRequest)
 
