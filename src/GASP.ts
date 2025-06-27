@@ -21,7 +21,7 @@ export type GASPOutput = {
   /** The output index */
   outputIndex: number
   /** The score/timestamp for this output */
-  score?: number
+  score: number
 }
 
 /**
@@ -403,18 +403,12 @@ export class GASP implements GASPRemote {
 
     // 2. Only do the “reply” half if unidirectional is disabled
     if (!this.unidirectional) {
-      const initialReply = await this.getInitialReply(initialResponse)
-      this.infoLog(`Received initial reply: ${JSON.stringify(initialReply)}`)
-
-      if (initialReply.UTXOList.length > 0) {
-        // Filter out UTXOs that the remote already told us about
-        const filteredReplyList = localUTXOs.filter(utxo =>
+      await this.runConcurrently(
+        localUTXOs.filter(utxo =>
+          utxo.score >= initialResponse.since &&
           !sharedOutpoints.has(this.compute36ByteStructure(utxo.txid, utxo.outputIndex))
-        )
-
-        this.infoLog(`Filtered reply list: ${filteredReplyList.length} UTXOs to send (from ${initialReply.UTXOList.length} total)`)
-
-        await this.runConcurrently(filteredReplyList, async UTXO => {
+        ),
+        async UTXO => {
           try {
             this.infoLog(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
             const outgoingNode = await this.storage.hydrateGASPNode(
@@ -429,7 +423,6 @@ export class GASP implements GASPRemote {
             this.warnLog(`Error with outgoing UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
           }
         })
-      }
     }
 
     // Update the sync timestamp after successful sync
