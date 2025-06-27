@@ -344,33 +344,41 @@ export class GASP implements GASPRemote {
         this.infoLog(`Loaded last sync timestamp for ${host}: ${this.lastInteraction}`)
       }
     }
-    
+
     this.infoLog(`Starting sync process. Last interaction timestamp: ${this.lastInteraction}`)
 
-    // Track all UTXOs the remote has told us about
-    const remoteKnownUTXOs = new Set<string>()
+    const localUTXOs = await this.storage.findKnownUTXOs(0)
+    // Find which UTXOs we already have
+    const knownOutpoints = new Set<string>()
+    for (const utxo of await this.storage.findKnownUTXOs(0)) {
+      knownOutpoints.add(this.compute36ByteStructure(utxo.txid, utxo.outputIndex))
+    }
+    const sharedOutpoints = new Set<string>()
 
-    // 1. Pull the remote UTXOs that we don't already have, page by page
     let initialResponse: GASPInitialResponse
-    
-    while (true) {
-      const initialRequest = await this.buildInitialRequest(this.lastInteraction, limit)
+    // 1. Pull the remote UTXOs that we don't already have, page by page
+    do {
+      let lastInteraction = this.lastInteraction
+      const initialRequest = await this.buildInitialRequest(lastInteraction, limit)
       initialResponse = await this.remote.getInitialResponse(initialRequest)
 
-      if (initialResponse.UTXOList.length === 0) {
-        // No more UTXOs to process
-        break
+      const ingestQueue: GASPOutput[] = []
+      for (const utxo of initialResponse.UTXOList) {
+        if (utxo.score !== undefined && utxo.score > lastInteraction) {
+          lastInteraction = utxo.score
+        }
+        const outpoint = this.compute36ByteStructure(utxo.txid, utxo.outputIndex)
+        if (knownOutpoints.has(outpoint)) {
+          sharedOutpoints.add(outpoint)
+          knownOutpoints.delete(outpoint)
+        } else if (!sharedOutpoints.has(outpoint)) {
+          ingestQueue.push(utxo)
+        }
       }
-
       this.infoLog(`Processing page with ${initialResponse.UTXOList.length} UTXOs (since: ${initialResponse.since})`)
-      
-      // Find which UTXOs we already have
-      const foreignUTXOs = await this.storage.findKnownUTXOs(0)
 
       await this.runConcurrently(
-        initialResponse.UTXOList.filter(x =>
-          !foreignUTXOs.some(y => x.txid === y.txid && x.outputIndex === y.outputIndex)
-        ),
+        ingestQueue,
         async UTXO => {
           try {
             this.infoLog(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
@@ -384,26 +392,15 @@ export class GASP implements GASPRemote {
             this.debugLog(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
             await this.processIncomingNode(resolvedNode)
             await this.completeGraph(resolvedNode.graphID)
-            remoteKnownUTXOs.add(outpoint)
+            sharedOutpoints.add(outpoint)
           } catch (e) {
             this.warnLog(`Error with incoming UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
           }
         }
       )
-      
-      // Update lastInteraction based on the scores of the UTXOs processed
-      for (const utxo of initialResponse.UTXOList) {
-        if (utxo.score !== undefined && utxo.score > this.lastInteraction) {
-          this.lastInteraction = utxo.score
-        }
-      }
-      
-      // Check if we should continue fetching
-      if (initialRequest.limit && initialResponse.UTXOList.length < initialRequest.limit) {
-        // We got fewer items than requested, so there are no more pages
-        break
-      }
-    }
+
+      this.lastInteraction = lastInteraction
+    } while (limit && initialResponse.UTXOList.length >= limit)
 
     // 2. Only do the “reply” half if unidirectional is disabled
     if (!this.unidirectional) {
@@ -412,12 +409,12 @@ export class GASP implements GASPRemote {
 
       if (initialReply.UTXOList.length > 0) {
         // Filter out UTXOs that the remote already told us about
-        const filteredReplyList = initialReply.UTXOList.filter(utxo => 
-          !remoteKnownUTXOs.has(this.compute36ByteStructure(utxo.txid, utxo.outputIndex))
+        const filteredReplyList = localUTXOs.filter(utxo =>
+          !sharedOutpoints.has(this.compute36ByteStructure(utxo.txid, utxo.outputIndex))
         )
-        
+
         this.infoLog(`Filtered reply list: ${filteredReplyList.length} UTXOs to send (from ${initialReply.UTXOList.length} total)`)
-        
+
         await this.runConcurrently(filteredReplyList, async UTXO => {
           try {
             this.infoLog(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
@@ -441,7 +438,7 @@ export class GASP implements GASPRemote {
       await this.storage.updateLastInteraction(host, this.lastInteraction)
       this.infoLog(`Updated sync timestamp for ${host} to ${this.lastInteraction}`)
     }
-    
+
     this.infoLog('Sync completed!')
   }
 
