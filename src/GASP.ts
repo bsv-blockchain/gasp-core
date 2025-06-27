@@ -399,6 +399,7 @@ export class GASP implements GASPRemote {
       )
 
       this.lastInteraction = lastInteraction
+      await this.storage.updateLastInteraction(host, this.lastInteraction)
     } while (limit && initialResponse.UTXOList.length >= limit)
 
     // 2. Only do the “reply” half if unidirectional is disabled
@@ -424,13 +425,6 @@ export class GASP implements GASPRemote {
           }
         })
     }
-
-    // Update the sync timestamp after successful sync
-    if (this.storage.updateLastInteraction) {
-      await this.storage.updateLastInteraction(host, this.lastInteraction)
-      this.infoLog(`Updated sync timestamp for ${host} to ${this.lastInteraction}`)
-    }
-
     this.infoLog('Sync completed!')
   }
 
