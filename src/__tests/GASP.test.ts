@@ -90,8 +90,6 @@ class MockStorage implements GASPStorage {
         this.validateGraphAnchor = jest.fn(this.validateGraphAnchor.bind(this))
         this.discardGraph = jest.fn(this.discardGraph.bind(this))
         this.finalizeGraph = jest.fn(this.finalizeGraph.bind(this))
-        this.updateLastInteraction = jest.fn(this.updateLastInteraction.bind(this))
-        this.getLastInteraction = jest.fn(this.getLastInteraction.bind(this))
     }
 
     private logData(...data: any): void {
@@ -180,20 +178,6 @@ class MockStorage implements GASPStorage {
     
     // Mock topic property for testing
     topic: string = 'test-topic'
-    
-    // Mock host sync state storage
-    private hostSyncStates: Record<string, number> = {}
-    
-    async updateLastInteraction(host: string, since: number): Promise<void> {
-        this.hostSyncStates[host] = since
-        this.logData('updateLastSync', host, since)
-    }
-    
-    async getLastInteraction(host: string): Promise<number | null> {
-        const result = this.hostSyncStates[host] ?? null
-        this.logData('getLastSync', host, result)
-        return result
-    }
 }
 
 const mockUTXO = {

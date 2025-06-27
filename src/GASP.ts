@@ -116,18 +116,6 @@ export interface GASPStorage {
    * @param graphID The TXID and output index (in 36-byte format) for the UTXO at the tip of this graph.
    */
   finalizeGraph: (graphID: string) => Promise<void>
-  /**
-   * Updates the last interaction score for a given host
-   * @param host The host identifier
-   * @param since The score value to store
-   */
-  updateLastInteraction: (host: string, since: number) => Promise<void>
-  /**
-   * Retrieves the last interaction score for a given host
-   * @param host The host identifier
-   * @returns The last interaction score, or null if not found
-   */
-  getLastInteraction: (host: string) => Promise<number | null>
 }
 
 /**
@@ -336,15 +324,6 @@ export class GASP implements GASPRemote {
    * @param limit Optional limit for the number of UTXOs to fetch per page (default: 1000)
    */
   async sync(host: string, limit?: number): Promise<void> {
-    // Read the last sync timestamp if storage supports it
-    if (this.storage.getLastInteraction) {
-      const lastInteraction = await this.storage.getLastInteraction(host)
-      if (lastInteraction !== null) {
-        this.lastInteraction = lastInteraction
-        this.infoLog(`Loaded last sync timestamp for ${host}: ${this.lastInteraction}`)
-      }
-    }
-
     this.infoLog(`Starting sync process. Last interaction timestamp: ${this.lastInteraction}`)
 
     const localUTXOs = await this.storage.findKnownUTXOs(0)
@@ -356,15 +335,14 @@ export class GASP implements GASPRemote {
     const sharedOutpoints = new Set<string>()
 
     let initialResponse: GASPInitialResponse
-    let lastInteraction = this.lastInteraction
     do {
-      const initialRequest = await this.buildInitialRequest(lastInteraction, limit)
+      const initialRequest = await this.buildInitialRequest(this.lastInteraction, limit)
       initialResponse = await this.remote.getInitialResponse(initialRequest)
 
       const ingestQueue: GASPOutput[] = []
       for (const utxo of initialResponse.UTXOList) {
-        if (utxo.score !== undefined && utxo.score > lastInteraction) {
-          lastInteraction = utxo.score
+        if (utxo.score !== undefined && utxo.score > this.lastInteraction) {
+          this.lastInteraction = utxo.score
         }
         const outpoint = this.compute36ByteStructure(utxo.txid, utxo.outputIndex)
         if (knownOutpoints.has(outpoint)) {
@@ -397,9 +375,6 @@ export class GASP implements GASPRemote {
           }
         }
       )
-
-      this.lastInteraction = lastInteraction
-      await this.storage.updateLastInteraction(host, this.lastInteraction)
     } while (limit && initialResponse.UTXOList.length >= limit)
 
     // 2. Only do the “reply” half if unidirectional is disabled
