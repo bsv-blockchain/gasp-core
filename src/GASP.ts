@@ -8,6 +8,20 @@ export type GASPInitialRequest = {
   version: number
   /** An optional timestamp (UNIX-1970-seconds) of the last time these two parties synced */
   since: number
+  /** Optional limit on the number of UTXOs to return */
+  limit?: number
+}
+
+/**
+ * Represents an output in the GASP protocol.
+ */
+export type GASPOutput = {
+  /** The transaction ID */
+  txid: string
+  /** The output index */
+  outputIndex: number
+  /** The score/timestamp for this output */
+  score: number
 }
 
 /**
@@ -15,7 +29,7 @@ export type GASPInitialRequest = {
  */
 export type GASPInitialResponse = {
   /** A list of outputs witnessed by the recipient since the initial request's timestamp. If not provided, a complete list of outputs since the beginning of time is returned. Unconfirmed (non-timestamped) UTXOs are always returned. */
-  UTXOList: Array<{ txid: string, outputIndex: number }>,
+  UTXOList: GASPOutput[]
   /** A timestamp from when the responder wants to receive UTXOs in the other direction, back from the requester. */
   since: number
 }
@@ -23,7 +37,7 @@ export type GASPInitialResponse = {
 /** Represents the subsequent message sent in reply to the initial response. */
 export type GASPInitialReply = {
   /** A list of outputs (excluding outputs received from the Initial Response), and ONLY after the timestamp from the initial response. We don't need to send back things from the initial response, since those were already seen by the counterparty. */
-  UTXOList: Array<{ txid: string, outputIndex: number }>,
+  UTXOList: GASPOutput[]
 }
 
 /**
@@ -60,9 +74,11 @@ export interface GASPStorage {
   /**
    * Returns an array of transaction outpoints that are currently known to be unspent (given an optional timestamp).
    * Non-confirmed (non-timestamped) outputs should always be returned, regardless of the timestamp.
-   * @returns A promise for an array of objects, each containing txid and outputIndex properties.
+   * @param since The timestamp to find UTXOs after
+   * @param limit Optional limit on the number of UTXOs to return
+   * @returns A promise for an array of GASPOutput objects.
    */
-  findKnownUTXOs: (since: number) => Promise<Array<{ txid: string, outputIndex: number }>>
+  findKnownUTXOs: (since: number, limit?: number) => Promise<GASPOutput[]>
   /**
    * For a given txid and output index, returns the associated transaction, a merkle proof if the transaction is in a block, and metadata if if requested. If no metadata is requested, metadata hashes on inputs are not returned.
    * @param txid The transaction ID for the node to hydrate.
@@ -304,25 +320,48 @@ export class GASP implements GASPRemote {
 
   /**
    * Synchronizes the transaction data between the local and remote participants.
+   * @param host Host identifier for sync state management
+   * @param limit Optional limit for the number of UTXOs to fetch per page (default: 1000)
    */
-  async sync(): Promise<void> {
+  async sync(host: string, limit?: number): Promise<void> {
     this.infoLog(`Starting sync process. Last interaction timestamp: ${this.lastInteraction}`)
-    const initialRequest = await this.buildInitialRequest(this.lastInteraction)
-    const initialResponse = await this.remote.getInitialResponse(initialRequest)
 
-    // 1. Pull the remote UTXOs that we don't already have
-    if (initialResponse.UTXOList.length > 0) {
-      const foreignUTXOs = await this.storage.findKnownUTXOs(0)
+    const localUTXOs = await this.storage.findKnownUTXOs(0)
+    // Find which UTXOs we already have
+    const knownOutpoints = new Set<string>()
+    for (const utxo of await this.storage.findKnownUTXOs(0)) {
+      knownOutpoints.add(this.compute36ByteStructure(utxo.txid, utxo.outputIndex))
+    }
+    const sharedOutpoints = new Set<string>()
+
+    let initialResponse: GASPInitialResponse
+    do {
+      const initialRequest = await this.buildInitialRequest(this.lastInteraction, limit)
+      initialResponse = await this.remote.getInitialResponse(initialRequest)
+
+      const ingestQueue: GASPOutput[] = []
+      for (const utxo of initialResponse.UTXOList) {
+        if (utxo.score !== undefined && utxo.score > this.lastInteraction) {
+          this.lastInteraction = utxo.score
+        }
+        const outpoint = this.compute36ByteStructure(utxo.txid, utxo.outputIndex)
+        if (knownOutpoints.has(outpoint)) {
+          sharedOutpoints.add(outpoint)
+          knownOutpoints.delete(outpoint)
+        } else if (!sharedOutpoints.has(outpoint)) {
+          ingestQueue.push(utxo)
+        }
+      }
+      this.infoLog(`Processing page with ${initialResponse.UTXOList.length} UTXOs (since: ${initialResponse.since})`)
 
       await this.runConcurrently(
-        initialResponse.UTXOList.filter(x =>
-          !foreignUTXOs.some(y => x.txid === y.txid && x.outputIndex === y.outputIndex)
-        ),
+        ingestQueue,
         async UTXO => {
           try {
             this.infoLog(`Requesting node for UTXO: ${JSON.stringify(UTXO)}`)
+            const outpoint = this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex)
             const resolvedNode = await this.remote.requestNode(
-              this.compute36ByteStructure(UTXO.txid, UTXO.outputIndex),
+              outpoint,
               UTXO.txid,
               UTXO.outputIndex,
               true
@@ -330,20 +369,22 @@ export class GASP implements GASPRemote {
             this.debugLog(`Received unspent graph node from remote: ${JSON.stringify(resolvedNode)}`)
             await this.processIncomingNode(resolvedNode)
             await this.completeGraph(resolvedNode.graphID)
+            sharedOutpoints.add(outpoint)
           } catch (e) {
             this.warnLog(`Error with incoming UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
           }
         }
       )
-    }
+    } while (limit && initialResponse.UTXOList.length >= limit)
 
     // 2. Only do the “reply” half if unidirectional is disabled
     if (!this.unidirectional) {
-      const initialReply = await this.getInitialReply(initialResponse)
-      this.infoLog(`Received initial reply: ${JSON.stringify(initialReply)}`)
-
-      if (initialReply.UTXOList.length > 0) {
-        await this.runConcurrently(initialReply.UTXOList, async UTXO => {
+      await this.runConcurrently(
+        localUTXOs.filter(utxo =>
+          utxo.score >= initialResponse.since &&
+          !sharedOutpoints.has(this.compute36ByteStructure(utxo.txid, utxo.outputIndex))
+        ),
+        async UTXO => {
           try {
             this.infoLog(`Hydrating GASP node for UTXO: ${JSON.stringify(UTXO)}`)
             const outgoingNode = await this.storage.hydrateGASPNode(
@@ -358,20 +399,21 @@ export class GASP implements GASPRemote {
             this.warnLog(`Error with outgoing UTXO ${UTXO.txid}.${UTXO.outputIndex}: ${(e as Error).message}`)
           }
         })
-      }
     }
-
     this.infoLog('Sync completed!')
   }
 
   /**
    * Builds the initial request for the sync process.
+   * @param since The timestamp to sync from
+   * @param limit The limit for the number of UTXOs to fetch
    * @returns A promise for the initial request object.
    */
-  async buildInitialRequest(since: number): Promise<GASPInitialRequest> {
-    const request = {
+  async buildInitialRequest(since: number, limit?: number): Promise<GASPInitialRequest> {
+    const request: GASPInitialRequest = {
       version: this.version,
-      since
+      since,
+      limit
     }
     this.debugLog(`Built initial request: ${JSON.stringify(request)}`)
     return request
@@ -396,7 +438,7 @@ export class GASP implements GASPRemote {
     this.validateTimestamp(request.since)
     const response = {
       since: this.lastInteraction,
-      UTXOList: await this.storage.findKnownUTXOs(request.since)
+      UTXOList: await this.storage.findKnownUTXOs(request.since, request.limit)
     }
     this.debugLog(`Built initial response: ${JSON.stringify(response)}`)
     return response

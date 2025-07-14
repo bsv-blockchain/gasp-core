@@ -40,7 +40,7 @@ jest.mock('@bsv/sdk', () => {
   };
 });
 
-import { GASP, GASPInitialRequest, GASPNode, GASPNodeResponse, GASPStorage, GASPRemote, GASPInitialReply, GASPInitialResponse } from '../GASP'
+import { GASP, GASPInitialRequest, GASPNode, GASPNodeResponse, GASPStorage, GASPRemote, GASPInitialReply, GASPInitialResponse, GASPOutput } from '../GASP'
 
 type Graph = {
     graphID: string,
@@ -98,12 +98,13 @@ class MockStorage implements GASPStorage {
         }
     }
 
-    async findKnownUTXOs(since: number): Promise<{ txid: string; outputIndex: number }[]> {
+    async findKnownUTXOs(since: number, limit?: number): Promise<GASPOutput[]> {
         const utxos = this.knownStore
             .filter(x => !x.time || x.time > since) // Include UTXOs with no timestamp or timestamps greater than 'since'
-            .map(x => ({ txid: x.txid, outputIndex: x.outputIndex }))
+            .sort((a, b) => (a.time || 0) - (b.time || 0)) // Sort by time ascending
+            .map(x => ({ txid: x.txid, outputIndex: x.outputIndex, score: x.time }))
         this.logData('findKnownUTXOs', since, utxos)
-        return utxos
+        return limit ? utxos.slice(0, limit) : utxos
     }
 
     async hydrateGASPNode(graphID: string, txid: string, outputIndex: number, metadata: boolean): Promise<GASPNode> {
@@ -160,13 +161,23 @@ class MockStorage implements GASPStorage {
         const tempGraph = this.tempGraphStore[graphID]
         if (tempGraph) {
             this.logData('finalizeGraph', graphID, tempGraph)
-            this.knownStore.push(tempGraph)
+            // Check if UTXO already exists to prevent duplicates
+            const exists = this.knownStore.some(k => 
+                k.txid === tempGraph.txid && k.outputIndex === tempGraph.outputIndex
+            )
+            if (!exists) {
+                this.knownStore.push(tempGraph)
+            }
             this.updateCallback()
             delete this.tempGraphStore[graphID]
         } else {
             this.logData('no graph to finalize', graphID, tempGraph)
         }
     }
+
+    
+    // Mock topic property for testing
+    topic: string = 'test-topic'
 }
 
 const mockUTXO = {
@@ -194,6 +205,13 @@ const mockUTXOWithInput = {
     }
 }
 
+// Helper to compare UTXOs by txid and outputIndex only
+const compareUTXOs = (utxos1: GASPOutput[], utxos2: GASPOutput[]) => {
+    const normalized1 = utxos1.map(u => ({ txid: u.txid, outputIndex: u.outputIndex }))
+    const normalized2 = utxos2.map(u => ({ txid: u.txid, outputIndex: u.outputIndex }))
+    return expect(normalized1).toEqual(normalized2)
+}
+
 describe('GASP', () => {
     afterEach(() => {
         jest.resetAllMocks()
@@ -207,7 +225,7 @@ describe('GASP', () => {
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
         gasp1.version = 2
-        await expect(gasp1.sync()).rejects.toThrow(new Error('GASP version mismatch. Current version: 1, foreign version: 2'))
+        await expect(gasp1.sync('test-host')).rejects.toThrow(new Error('GASP version mismatch. Current version: 1, foreign version: 2'))
         expect(console.error).toHaveBeenCalledWith('[GASP #2] ', '[ERROR]', 'GASP version mismatch error: GASP version mismatch. Current version: 1, foreign version: 2')
         console.error = originalError
     })
@@ -217,9 +235,9 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage2.findKnownUTXOs(0)).length).toBe(1)
-        expect(await storage2.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
+        compareUTXOs(await storage2.findKnownUTXOs(0), await storage1.findKnownUTXOs(0))
     })
     it('Synchronizes a single UTXO from Bob to Alice', async () => {
         const storage1 = new MockStorage()
@@ -227,9 +245,9 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
-        expect(await storage1.findKnownUTXOs(0)).toEqual(await storage2.findKnownUTXOs(0))
+        compareUTXOs(await storage1.findKnownUTXOs(0), await storage2.findKnownUTXOs(0))
     })
     it('Discards graphs that do not validate from Alice to Bob', async () => {
         const storage1 = new MockStorage([mockUTXO])
@@ -240,7 +258,7 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage2.findKnownUTXOs(0)).length).toBe(0)
         expect(storage2.discardGraph).toHaveBeenCalledWith('mock_sender1_txid1.0')
     })
@@ -253,7 +271,7 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage1.findKnownUTXOs(0)).length).toBe(0)
         expect(storage1.discardGraph).toHaveBeenCalledWith('mock_sender1_txid1.0')
     })
@@ -273,9 +291,9 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
-        expect(await storage1.findKnownUTXOs(0)).toEqual(await storage2.findKnownUTXOs(0))
+        compareUTXOs(await storage1.findKnownUTXOs(0), await storage2.findKnownUTXOs(0))
     })
     it('Synchronizes a deep UTXO from Alice to Bob', async () => {
         const storage2 = new MockStorage()
@@ -293,9 +311,9 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage2.findKnownUTXOs(0)).length).toBe(1)
-        expect(await storage2.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
+        compareUTXOs(await storage2.findKnownUTXOs(0), await storage1.findKnownUTXOs(0))
     })
     it('Synchronizes multiple graphs from Alice to Bob', async () => {
         const mockUTXO2 = {
@@ -303,7 +321,7 @@ describe('GASP', () => {
             rawTx: 'mock_sender2_rawtx1',
             outputIndex: 0,
             time: 222,
-            txid: 'mock_sender2_txid1',
+                    txid: 'mock_sender2_txid1',
             inputs: {}
         }
 
@@ -312,9 +330,9 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage2.findKnownUTXOs(0)).length).toBe(2)
-        expect(await storage2.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
+        compareUTXOs(await storage2.findKnownUTXOs(0), await storage1.findKnownUTXOs(0))
     })
     it('Synchronizes a graph with recursive inputs from Bob to Alice', async () => {
         const recursiveInputNode = {
@@ -322,7 +340,7 @@ describe('GASP', () => {
             rawTx: 'recursive_rawtx',
             outputIndex: 1,
             time: 333,
-            txid: 'recursive_txid',
+                    txid: 'recursive_txid',
             inputs: {}
         }
 
@@ -360,9 +378,9 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
-        expect(await storage1.findKnownUTXOs(0)).toEqual(await storage2.findKnownUTXOs(0))
+        compareUTXOs(await storage1.findKnownUTXOs(0), await storage2.findKnownUTXOs(0))
     })
     it('Synchronizes only UTXOs created after the specified since timestamp', async () => {
         const oldUTXO = {
@@ -388,12 +406,12 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 150, '[GASP #2] ') // Setting the `since` timestamp to 150
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
 
         // Ensure only the new UTXO is synchronized
         const syncedUTXOs = await storage2.findKnownUTXOs(0)
         expect(syncedUTXOs.length).toBe(1)
-        expect(syncedUTXOs).toEqual([{ txid: 'new_txid', outputIndex: 1 }])
+        expect(syncedUTXOs.map(u => ({ txid: u.txid, outputIndex: u.outputIndex }))).toEqual([{ txid: 'new_txid', outputIndex: 1 }])
     })
     it('Will not sync unnecessary graphs', async () => {
         const storage1 = new MockStorage([mockUTXO])
@@ -401,12 +419,12 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
+        await gasp1.sync('test-host')
         expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
         expect((await storage2.findKnownUTXOs(0)).length).toBe(1)
         expect(storage1.finalizeGraph).not.toHaveBeenCalled()
         expect(storage2.finalizeGraph).not.toHaveBeenCalled()
-        expect(await storage2.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
+        compareUTXOs(await storage2.findKnownUTXOs(0), await storage1.findKnownUTXOs(0))
     })
     it('Handles invalid timestamp format gracefully', async () => {
         const storage1 = new MockStorage()
@@ -420,8 +438,8 @@ describe('GASP', () => {
         const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
-        await gasp1.sync()
-        expect(await storage2.findKnownUTXOs(0)).not.toEqual(await storage1.findKnownUTXOs(0))
+        await gasp1.sync('test-host')
+        expect((await storage2.findKnownUTXOs(0)).length).not.toEqual((await storage1.findKnownUTXOs(0)).length)
     })
     it('Handles multiple UTXOs with mixed success and failure', async () => {
         const invalidUTXO = {
@@ -454,11 +472,11 @@ describe('GASP', () => {
         const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
         gasp1.remote = gasp2
 
-        await gasp1.sync()
+        await gasp1.sync('test-host')
 
         const syncedUTXOs = await storage2.findKnownUTXOs(0)
         expect(syncedUTXOs.length).toBe(1)
-        expect(syncedUTXOs).toEqual([{ txid: 'mock_sender1_txid1', outputIndex: 0 }])
+        expect(syncedUTXOs.map(u => ({ txid: u.txid, outputIndex: u.outputIndex }))).toEqual([{ txid: 'mock_sender1_txid1', outputIndex: 0 }])
     })
     describe('Not that this should ever happen in Bitcoin, but...', () => {
         it('Prevents infinite recursion with cyclically referencing nodes', async () => {
@@ -526,12 +544,12 @@ describe('GASP', () => {
             const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
             const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
             gasp1.remote = gasp2
-            await gasp1.sync()
+            await gasp1.sync('test-host')
 
             // No UTXOs were synced between the parties
             expect((await storage2.findKnownUTXOs(0)).length).toBe(0)
             // The sync process did not complete
-            expect(await storage2.findKnownUTXOs(0)).not.toEqual(await storage1.findKnownUTXOs(0))
+            expect((await storage2.findKnownUTXOs(0)).length).not.toEqual((await storage1.findKnownUTXOs(0)).length)
             // Two nodes were appended to the temporary graph
             expect(storage2.appendToGraph).toHaveBeenCalledTimes(2)
             // Two nodes are in temporary storage, the ones that were sent
@@ -602,11 +620,11 @@ describe('GASP', () => {
             const gasp1 = new GASP(storage1, throwawayRemote, 0, '[GASP #1] ')
             const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
             gasp1.remote = gasp2
-            await gasp1.sync()
+            await gasp1.sync('test-host')
 
             // This direction, the UTXO does sync because the recipient is able to proceed to graph finalization after refusing to process duplicative data.
             expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
-            expect(await storage1.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0))
+            expect((await storage1.findKnownUTXOs(0)).length).toBe(1)
             expect(storage1.appendToGraph).toHaveBeenCalledTimes(2)
         })
         it('Prevents infinite recursion with complex cyclic dependencies', async () => {
@@ -724,10 +742,10 @@ describe('GASP', () => {
             const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
             gasp1.remote = gasp2;
 
-            await gasp1.sync();
+            await gasp1.sync('test-host');
 
             expect((await storage2.findKnownUTXOs(0)).length).toBe(0);
-            expect(await storage2.findKnownUTXOs(0)).not.toEqual(await storage1.findKnownUTXOs(0));
+            expect((await storage2.findKnownUTXOs(0)).length).not.toEqual((await storage1.findKnownUTXOs(0)).length);
             expect(storage2.appendToGraph).toHaveBeenCalledTimes(3);
             expect(Object.keys(storage2.tempGraphStore).length).toEqual(3);
         })
@@ -847,10 +865,10 @@ describe('GASP', () => {
             const gasp2 = new GASP(storage2, gasp1, 0, '[GASP #2] ')
             gasp1.remote = gasp2;
 
-            await gasp1.sync();
+            await gasp1.sync('test-host');
 
             expect((await storage1.findKnownUTXOs(0)).length).toBe(1);
-            expect(await storage1.findKnownUTXOs(0)).toEqual(await storage1.findKnownUTXOs(0));
+            expect((await storage1.findKnownUTXOs(0)).length).toBe(1);
             expect(storage1.appendToGraph).toHaveBeenCalledTimes(3);
         })
     })
@@ -893,16 +911,16 @@ describe('GASP', () => {
             gaspAlice.remote = gaspBob
 
             // Let Alice do a unidirectional sync from Bob
-            await gaspAlice.sync()
+            await gaspAlice.sync('test-host')
 
             // Expect that Bob's UTXO has arrived in Alice's store
-            expect((await storageAlice.findKnownUTXOs(0))).toEqual([
+            expect((await storageAlice.findKnownUTXOs(0)).map(u => ({ txid: u.txid, outputIndex: u.outputIndex }))).toEqual([
                 { txid: 'alice_txid', outputIndex: 0 },
                 { txid: 'bob_txid', outputIndex: 1 }
             ])
 
             // But, Bob does NOT get Alice's UTXO, because unidirectional means no "reply" from Alice
-            expect((await storageBob.findKnownUTXOs(0))).toEqual([
+            expect((await storageBob.findKnownUTXOs(0)).map(u => ({ txid: u.txid, outputIndex: u.outputIndex }))).toEqual([
                 { txid: 'bob_txid', outputIndex: 1 }
             ])
         })
@@ -941,16 +959,16 @@ describe('GASP', () => {
             gaspBob.remote = gaspAlice
 
             // Bob does a unidirectional sync from Alice
-            await gaspBob.sync()
+            await gaspBob.sync('test-host')
 
             // Expect that Alice's UTXO has arrived in Bob's store
-            expect((await storageBob.findKnownUTXOs(0))).toEqual([
+            expect((await storageBob.findKnownUTXOs(0)).map(u => ({ txid: u.txid, outputIndex: u.outputIndex }))).toEqual([
                 { txid: 'bob_txid', outputIndex: 1 },
                 { txid: 'alice_txid', outputIndex: 0 }
             ])
 
             // But, Alice does NOT get Bob's UTXO, because Bob never pushes it in unidirectional mode
-            expect((await storageAlice.findKnownUTXOs(0))).toEqual([
+            expect((await storageAlice.findKnownUTXOs(0)).map(u => ({ txid: u.txid, outputIndex: u.outputIndex }))).toEqual([
                 { txid: 'alice_txid', outputIndex: 0 }
             ])
         })
