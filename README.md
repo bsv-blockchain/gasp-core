@@ -1,5 +1,9 @@
 # GASP — Graph Aware Sync Protocol
 
+> **⚠️ This repository is being archived.**
+>
+> Development has moved to the [ts-stack monorepo](https://github.com/bsv-blockchain/ts-stack/tree/main/packages/overlays/gasp-core). Open issues will be migrated there. This repository will be archived in the coming days — please open new issues and PRs in the monorepo going forward.
+
 The **Graph Aware Sync Protocol** (GASP) is a powerful protocol for synchronizing BSV transaction data between two or more parties. Unlike simplistic “UTXO list” or “transaction pushing” mechanisms, GASP allows each participant to incrementally build a *graph* of transaction ancestors and descendants. This ensures:
 
 1. **Legitimacy**: Parties only finalize data they can validate, using Merkle proofs, script evaluation, and the other rules of SPV.  
